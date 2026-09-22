@@ -1,0 +1,212 @@
+# ═══════════════════════════════════════════════════════════════════════════
+#  Temporal Knowledge Graph Embedding — .gitignore
+#  Emerging Research Gap Detection in Scientific Literature
+# ═══════════════════════════════════════════════════════════════════════════
+# Patterns with **/ prefix work from any subdirectory.
+# Patterns without **/ are anchored relative to the repo root.
+
+## ── Python ───────────────────────────────────────────────────────────────
+**/__pycache__/
+**/*.py[cod]
+**/*$py.class
+**/*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+*.egg
+.installed.cfg
+*.manifest
+*.pot
+*.pybuild/
+pip-log.txt
+pip-delete-this-directory.txt
+
+## ── Virtual environments ─────────────────────────────────────────────────
+venv/
+.env
+.venv/
+env/
+ENV/
+*.venv/
+conda-env/
+.conda/
+conda-meta/
+
+## ── IDEs / Editors ───────────────────────────────────────────────────────
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.code-workspace
+.ipynb_checkpoints/
+*.sublime-project
+*.sublime-workspace
+*.swp
+*.swo
+*~
+*#
+.\#*
+/.emacs.desktop
+/.emacs.desktop.lock
+
+## ── macOS ────────────────────────────────────────────────────────────────
+**/.DS_Store
+**/.DS_Store?
+**/._*
+.Spotlight-V100/
+.Trashes/
+ehthumbs.db
+Thumbs.db
+
+## ── Windows ──────────────────────────────────────────────────────────────
+AppData/
+LocalSettings/
+*.cab
+*.msi
+*.msm
+*.msp
+
+## ── Secrets / Credentials ────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.secrets
+credentials*
+*.pem
+*.key
+*.p12
+*.pfx
+
+## ── HuggingFace / Transformers cache ─────────────────────────────────────
+~/.cache/huggingface/
+cache/
+models/
+
+## ── Logs ─────────────────────────────────────────────────────────────────
+component2_entity_relation_extraction/logs/
+com2_using_3models/logs/
+
+## ── Component 2: Model weight files ONLY (keep config/tokenizer JSONs) ──
+##    Both trees: ignore the heavy weight files, keep the small configs.
+##
+##    checkpoint/ directories: ignore the heavy weight files only.
+component2_entity_relation_extraction/scripts/checkpoints/**/*.safetensors
+component2_entity_relation_extraction/scripts/checkpoints/**/*.pt
+component2_entity_relation_extraction/scripts/checkpoints/**/*.zip
+component2_entity_relation_extraction/scripts/checkpoints/**/*.hdf5
+component2_entity_relation_extraction/scripts/checkpoints/**/training_args.bin
+component2_entity_relation_extraction/scripts/checkpoints/**/*.bin
+com2_using_3models/scripts/checkpoints/**/*.safetensors
+com2_using_3models/scripts/checkpoints/**/*.pt
+com2_using_3models/scripts/checkpoints/**/*.zip
+com2_using_3models/scripts/checkpoints/**/*.hdf5
+com2_using_3models/scripts/checkpoints/**/training_args.bin
+com2_using_3models/scripts/checkpoints/**/*.bin
+##
+##    Global fallbacks (catches any other .safetensors/.pt/.zip in repo):
+**/*.safetensors
+**/*.pt
+**/*.zip
+**/*.hdf5
+**/training_args.bin
+**/*.bin
+##
+##    Files RETAINED (small configs, tokenizer files, F1 eval results):
+##      config.json, tokenizer.json, tokenizer_config.json (HF model configs)
+##      labels.json (relation label schema)
+##      scierc_test_f1.json (NER eval results, ~small)
+##      scierc_relation_test_f1.json (relation eval results, ~small)
+##      scierc_data/processed_data/json/*.json (train/dev/test splits)
+
+## ── Component 5: Regenerable outputs ────────────────────────────────────
+
+# Structural embeddings (.npy) — regenerable via 02_structural_embeddings.py
+**/component5/output/embeddings/structural/*.npy
+
+# Semantic embeddings (.npy) — regenerable via 03_semantic_embeddings.py
+**/component5/output/embeddings/semantic/*.npy
+
+# Graph slices (.gpickle) — regenerable via 01_build_slices.py
+**/component5/output/slices/*.gpickle
+
+# Full gap sweep (hundreds of alpha-variant files) — regenerable via 04
+**/component5/output/gaps/*.json
+**/component5/output/gaps/*.meta.json
+!**/component5/output/top_gaps_NLP_latest.json
+!**/component5/output/top_gaps_COVID_latest.json
+!**/component5/output/ablation_NLP.json
+!**/component5/output/ablation_NLP.md
+!**/component5/output/ablation_COVID.json
+!**/component5/output/ablation_COVID.md
+!**/component5/output/slices_build_log.json
+
+## ── Component 6: Regenerable outputs ────────────────────────────────────
+
+# Citation caches — regenerable via 01_fetch_citations.py
+**/component6/output/citations/*.json
+!**/component6/output/citations/COVID_FALLBACK.txt
+!**/component6/output/citations/NLP_FALLBACK.txt
+
+# Full rerank sweep (hundreds of alpha-variant files) — regenerable via 03
+**/component6/output/reranked/
+!**/component6/output/top_velocity_gaps_NLP_latest.json
+!**/component6/output/top_velocity_gaps_COVID_latest.json
+!**/component6/output/ablation_velocity_NLP.json
+!**/component6/output/ablation_velocity_NLP.md
+!**/component6/output/ablation_velocity_COVID.json
+!**/component6/output/ablation_velocity_COVID.md
+
+## ── Component 2: Intermediate slice/extracted files in alternate tree ───
+##    _extracted_slice.json files are scratch intermediates used only by
+##    com2_using_3models/scripts/ scripts. _extracted.json files (no _slice)
+##    are READ by Components 3, 5, 6 — they contain paper text for validation,
+##    so they are KEEP (research inputs, not just intermediates).
+**/com2_using_3models/output/*_extracted_slice.json
+**/com2_using_3models/output/scibert/*_extracted_slice.json
+**/com2_using_3models/output/roberta/*_extracted_slice.json
+**/com2_using_3models/output/pubmedbert/*_extracted_slice.json
+**/com2_using_3models/output/NLP_entities_slice.json
+**/com2_using_3models/output/COVID_entities_slice.json
+**/com2_using_3models/output/NLP_relations_slice.json
+**/com2_using_3models/output/COVID_relations_slice.json
+
+## ── Dashboard: Generated exports ─────────────────────────────────────────
+**/dashboard/exports/
+
+## ── Notebook / temp ──────────────────────────────────────────────────────
+*.tmp
+*.bak
+temp/
+tmp/
+
+## ── Test / coverage ──────────────────────────────────────────────────────
+.coverage
+htmlcov/
+.tox/
+.nox/
+*.cover
+coverage.xml
+*.coverprofile
+
+## ── mypy / lint / pytest ─────────────────────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytest_cache/
+.ruff_cache/
+
+## ── Streamlit ────────────────────────────────────────────────────────────
+.st/
+.streamlit/secrets.toml
