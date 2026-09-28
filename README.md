@@ -16,15 +16,15 @@ capstone_sep_15/
 │   │   └── covid/          # Raw + sampled COVID corpus JSONs
 │   └── scripts/            # 01–06 collector scripts
 │
-├── component2_entity_relation_extraction/   # Component 2 (original SciBERT pipeline)
+├── component2_entity_relation_extraction/   # Component 2 (original SciBERT pipeline) — CANONICAL
 │   ├── scripts/            # NER + relation extraction, baseline, validation
 │   ├── output/             # Consolidated {NLP,COVID}_entities.json, _relations.json
 │   ├── reports/            # Component 2 report
 │   └── logs/
 │
-├── com2_using_3models/     # Component 2 (multi-model evolution: SciBERT + RoBERTa + PubMedBERT)
-│   ├── scripts/            # Multi-model extraction pipeline
-│   ├── output/             # Per-model subdirectories + consolidated outputs
+├── com2_using_3models/     # Component 2 (multi-model evolution: SciBERT + RoBERTa + PubMedBERT) — reference only
+│   ├── scripts/            # Multi-model extraction pipeline + extra eval scripts
+│   ├── output/             # Per-model subdirectories + consolidated outputs (identical to canonical tree)
 │   ├── reports/            # Model comparison report
 │   └── logs/
 │

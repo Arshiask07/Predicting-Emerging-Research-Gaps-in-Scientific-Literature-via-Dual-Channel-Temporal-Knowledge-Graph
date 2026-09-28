@@ -36,6 +36,7 @@ from pathlib import Path
 
 import numpy as np
 import networkx as nx
+import pickle
 
 # ── paths ──────────────────────────────────────────────────────────────────
 # Derived from this script's own location so the pipeline runs unchanged on
@@ -197,7 +198,8 @@ def main() -> None:
 
             if slice_path.exists() and not args.force:
                 # Load to log counts even when skipping
-                G = nx.read_gpickle(slice_path)
+                with open(slice_path, "rb") as fh:
+                    G = pickle.load(fh)
                 build_log.append({
                     "domain": domain, "year": year,
                     "nodes": G.number_of_nodes(),
@@ -223,7 +225,8 @@ def main() -> None:
                 print(f"  [{year}] nodes={n_nodes:,}  edges={n_edges:,}  "
                       f"time={elapsed:.2f}s")
 
-            nx.write_gpickle(G, slice_path)
+            with open(slice_path, "wb") as fh:
+                pickle.dump(G, fh)
 
             build_log.append({
                 "domain": domain, "year": year,

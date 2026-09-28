@@ -245,69 +245,120 @@ def validate_with_real_data(domain_key: str,
     ent_surfaces = _surface_forms_from_entities(raw_entities)
     paper_idx = _build_paper_index_post_cutoff(papers, cutoff)
 
-    # Score gaps at cutoff — we approximate by checking unconnected pairs
-    # in the cutoff-year graph with high semantic proximity (proxied by
-    # shared paper context in pre-cutoff data).
-    pre_yrs = [y for y in year_graphs if y <= cutoff]
-    post_yrs = [y for y in year_graphs if y > cutoff]
+    # ── Try embedding-based gap scoring (C5/dashboard path) ───────────────
+    # Load embeddings from dashboard exports if available.  When present,
+    # use gap_engine.rank_gaps() for scoring instead of the co-occurrence
+    # heuristic below — this gives real fused similarity scores.
+    use_embeddings = False
+    emb_by_channel = None
+    try:
+        import data_loader as dl
+        emb_by_channel = dl.load_entity_embeddings(domain_key)
+        if emb_by_channel.get("node2vec") and emb_by_channel.get("specter2"):
+            # Check that we have data at the cutoff year
+            nv = emb_by_channel["node2vec"]
+            sp = emb_by_channel["specter2"]
+            if cutoff in nv and (cutoff - 1) in nv and cutoff in sp:
+                use_embeddings = True
+    except Exception:
+        pass  # embeddings not available → fall back to heuristic
 
-    if not pre_yrs:
-        return {"status": "skipped",
-                "reason": f"No pre-cutoff ({cutoff}) graph data."}
+    # Build entity_id -> label map for embedding loading
+    entity_label_map = {}
+    entity_first_year = {}
+    for _, r in entities_df.iterrows():
+        entity_label_map[r.entity_id] = r.label
+        if r.entity_id not in entity_first_year or r.first_year < entity_first_year[r.entity_id]:
+            entity_first_year[r.entity_id] = r.first_year
 
-    # Build candidate gap list: entities that co-occur in >=1 pre-cutoff
-    # paper but NOT in the cutoff-year graph (i.e. they drifted apart or
-    # were never directly linked at cutoff time).
-    cutoff_graph = year_graphs.get(cutoff, nx.Graph())
-    pre_entities = set()
-    for y in pre_yrs:
-        pre_entities |= set(year_graphs[y].nodes)
+    if use_embeddings and emb_by_channel:
+        # Convert year_graphs to dict-of-Graph format expected by gap_engine
+        graphs_dict = {y: g for y, g in year_graphs.items() if y <= cutoff}
+        # Add nodes for all entities present in pre-cutoff graphs
+        for y, g in graphs_dict.items():
+            for node in list(g.nodes):
+                if not g.has_node(node):
+                    g.add_node(node)
 
-    # Find unconnected pairs that appeared in at least one pre-cutoff paper
-    # together (potential gap: mentioned together before but not linked now)
-    candidates = []
-    seen_pairs = set()
-    for pid, ents in paper_entities.items():
-        yr = year_map.get(pid, 0)
-        if yr > cutoff:
-            continue
-        for u in ents:
-            for v in ents:
-                if u >= v:
-                    continue
-                key = (u, v) if u < v else (v, u)
-                if key in seen_pairs:
-                    continue
-                seen_pairs.add(key)
-                # Check if they're unconnected in cutoff graph
-                if not cutoff_graph.has_edge(*key):
-                    candidates.append({
-                        "u": key[0], "v": key[1],
-                        "pre_cutoff_cooccurrences": 1,
-                        "year_first_seen": yr,
-                    })
+        # score gaps using real embeddings via gap_engine
+        from gap_engine import rank_gaps as ge_rank_gaps
+        pre_cits = pd.DataFrame()  # citation data not available in C3 standalone
+        ranked, checked = ge_rank_gaps(
+            emb_by_channel, graphs_dict, pre_cits,
+            alpha=alpha, t=cutoff, t1=cutoff - 1, top_k=top_k * 3,
+            sample_n=400, seed=42,
+        )
+        if checked == 0:
+            return {"status": "skipped",
+                    "reason": f"No gaps scored at cutoff {cutoff} with embeddings."}
 
-    # Deduplicate by pair and count co-occurrences
-    pair_counts = defaultdict(int)
-    pair_first_year = {}
-    for c in candidates:
-        key = (c["u"], c["v"])
-        pair_counts[key] += 1
-        if key not in pair_first_year:
-            pair_first_year[key] = c["year_first_seen"]
+        # Use ranked gaps directly — check post-cutoff materialization
+        top_candidates = ranked.to_dict("records")
+    else:
+        # ── Fallback: co-occurrence heuristic (original behaviour) ────────
+        # Score gaps at cutoff — we approximate by checking unconnected pairs
+        # in the cutoff-year graph with high semantic proximity (proxied by
+        # shared paper context in pre-cutoff data).
+        pre_yrs = [y for y in year_graphs if y <= cutoff]
+        post_yrs = [y for y in year_graphs if y > cutoff]
 
-    gap_candidates = []
-    for (u, v), cnt in pair_counts.items():
-        gap_candidates.append({
-            "u": u, "v": v,
-            "pre_cutoff_cooccurrences": cnt,
-            "year_first_seen": pair_first_year[(u, v)],
-        })
+        if not pre_yrs:
+            return {"status": "skipped",
+                    "reason": f"No pre-cutoff ({cutoff}) graph data."}
 
-    # Sort by pre-cutoff co-occurrence count (proxy for "should be linked")
-    gap_candidates.sort(key=lambda x: (-x["pre_cutoff_cooccurrences"], x["year_first_seen"]))
+        # Build candidate gap list: entities that co-occur in >=1 pre-cutoff
+        # paper but NOT in the cutoff-year graph (i.e. they drifted apart or
+        # were never directly linked at cutoff time).
+        cutoff_graph = year_graphs.get(cutoff, nx.Graph())
+        pre_entities = set()
+        for y in pre_yrs:
+            pre_entities |= set(year_graphs[y].nodes)
 
-    top_candidates = gap_candidates[:top_k * 3]  # oversample, then filter
+        # Find unconnected pairs that appeared in at least one pre-cutoff paper
+        # together (potential gap: mentioned together before but not linked now)
+        candidates = []
+        seen_pairs = set()
+        for pid, ents in paper_entities.items():
+            yr = year_map.get(pid, 0)
+            if yr > cutoff:
+                continue
+            for u in ents:
+                for v in ents:
+                    if u >= v:
+                        continue
+                    key = (u, v) if u < v else (v, u)
+                    if key in seen_pairs:
+                        continue
+                    seen_pairs.add(key)
+                    # Check if they're unconnected in cutoff graph
+                    if not cutoff_graph.has_edge(*key):
+                        candidates.append({
+                            "u": key[0], "v": key[1],
+                            "pre_cutoff_cooccurrences": 1,
+                            "year_first_seen": yr,
+                        })
+
+        # Deduplicate by pair and count co-occurrences
+        pair_counts = defaultdict(int)
+        pair_first_year = {}
+        for c in candidates:
+            key = (c["u"], c["v"])
+            pair_counts[key] += 1
+            if key not in pair_first_year:
+                pair_first_year[key] = c["year_first_seen"]
+
+        gap_candidates = []
+        for (u, v), cnt in pair_counts.items():
+            gap_candidates.append({
+                "u": u, "v": v,
+                "pre_cutoff_cooccurrences": cnt,
+                "year_first_seen": pair_first_year[(u, v)],
+            })
+
+        # Sort by pre-cutoff co-occurrence count (proxy for "should be linked")
+        gap_candidates.sort(key=lambda x: (-x["pre_cutoff_cooccurrences"], x["year_first_seen"]))
+
+        top_candidates = gap_candidates[:top_k * 3]  # oversample, then filter
 
     # Check post-cutoff materialization
     hits = []
@@ -331,13 +382,36 @@ def validate_with_real_data(domain_key: str,
                 materialized = True
                 break
 
+        # Build record — include pre_cutoff_cooccurrences and year_first_seen
+        # from the candidate dict if available (heuristic path), or set defaults
+        # for embedding-scored gaps (which don't carry these fields).
         record = {
             "u": u,
             "v": v,
-            "pre_cutoff_cooccurrences": gc["pre_cutoff_cooccurrences"],
-            "year_first_seen": gc["year_first_seen"],
+            "pre_cutoff_cooccurrences": gc.get("pre_cutoff_cooccurrences", 0),
+            "year_first_seen": gc.get("year_first_seen", 0),
             "materialized_post_cutoff": materialized,
         }
+        # If this came from gap_engine ranking, carry the scores too
+        if "gap_score" in gc:
+            record["gap_score"] = gc["gap_score"]
+            record["sim_t"] = gc.get("sim_t", 0)
+            record["delta_sim"] = gc.get("delta_sim", 0)
+        if "priority" in gc:
+            record["priority"] = gc["priority"]
+        if "sim_history" in gc:
+            record["sim_history"] = gc["sim_history"]
+        if "vel_u" in gc:
+            record["vel_u"] = gc["vel_u"]
+            record["vel_v"] = gc["vel_v"]
+        if "pre_cutoff_cooccurrences" not in gc:
+            # For embedding-scored gaps, infer year_first_seen from entities_df
+            if u in entity_first_year:
+                record["year_first_seen"] = entity_first_year[u]
+            if v in entity_first_year:
+                pass  # keep the min
+            record["pre_cutoff_cooccurrences"] = 0  # unknown for embedding path
+
         if materialized:
             hits.append(record)
         else:
@@ -364,6 +438,7 @@ def validate_with_real_data(domain_key: str,
         "elapsed_seconds": elapsed,
         "top_hits": hits[:top_k],
         "top_misses": misses[:top_k],
+        "scoring_method": "embedding" if use_embeddings else "cooccurrence",
         "status": "ok",
     }
 
@@ -412,14 +487,18 @@ def _write_summary(report: dict, path: Path):
         f"| Misses (not materialized) | {report['misses']} |",
         f"| **Hit rate** | **{report['hit_rate']:.2%}** |",
         f"| Wall-clock time | {report['elapsed_seconds']} s |",
+        f"| Scoring method | {report.get('scoring_method', 'cooccurrence')} |",
         "",
     ]
 
     if report["top_hits"]:
         lines += ["## Top materialized gaps (post-cutoff co-mentions)", ""]
         for i, h in enumerate(report["top_hits"][:10], 1):
+            extra = ""
+            if "gap_score" in h:
+                extra = f"  · gap_score={h['gap_score']:.4f}"
             lines += [
-                f"{i}. **{h['u']}** ⟷ **{h['v']}**",
+                f"{i}. **{h['u']}** ⟷ **{h['v']}**{extra}",
                 f"   - Pre-cutoff co-occurrences: {h['pre_cutoff_cooccurrences']}",
                 f"   - First seen: {h['year_first_seen']}",
                 "",
@@ -428,8 +507,11 @@ def _write_summary(report: dict, path: Path):
     if report["top_misses"]:
         lines += ["## Top missed gaps (not materialized post-cutoff)", ""]
         for i, m in enumerate(report["top_misses"][:10], 1):
+            extra = ""
+            if "gap_score" in m:
+                extra = f"  · gap_score={m['gap_score']:.4f}"
             lines += [
-                f"{i}. **{m['u']}** ⟷ **{m['v']}**",
+                f"{i}. **{m['u']}** ⟷ **{m['v']}**{extra}",
                 f"   - Pre-cutoff co-occurrences: {m['pre_cutoff_cooccurrences']}",
                 f"   - First seen: {m['year_first_seen']}",
                 "",

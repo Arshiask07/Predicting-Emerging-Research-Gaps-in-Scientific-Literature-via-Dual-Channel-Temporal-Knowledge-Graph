@@ -30,13 +30,26 @@ def build_graphs(entities_df, edges_df):
     return graphs
 
 
-def rank_gaps(embeddings, graphs, cit_df, alpha=config.ALPHA_CHOICES[1],
-              t=config.T_LATEST, t1=config.T_PREV, min_vel=0.0, top_k=None):
+def rank_gaps(
+    embeddings,
+    graphs,
+    cit_df,
+    alpha=config.ALPHA_CHOICES[1],
+    t=config.T_LATEST,
+    t1=config.T_PREV,
+    min_vel=0.0,
+    top_k=None,
+    sample_n=None,       # if set, randomly sample this many nodes before pairing
+    seed=42,
+):
     rows, checked = [], 0
     ch = embeddings["node2vec"]
     if t not in ch or t1 not in ch:
         return pd.DataFrame(), checked
     common = sorted(set(ch[t].index) & set(ch[t1].index))
+    if sample_n is not None and sample_n < len(common):
+        rng = np.random.default_rng(seed)
+        common = sorted(rng.choice(common, size=sample_n, replace=False).tolist())
 
     for i, u in enumerate(common):
         for v in common[i + 1:]:
@@ -66,7 +79,8 @@ def rank_gaps(embeddings, graphs, cit_df, alpha=config.ALPHA_CHOICES[1],
                 continue
             hist = {}
             for y in ch:
-                if u in ch[y].index and v in embeddings["specter2"].get(y, pd.DataFrame()).index:
+                if (u in ch[y].index and v in ch[y].index
+                        and v in embeddings["specter2"].get(y, pd.DataFrame()).index):
                     hist[y] = round(fused_sim(
                         ch[y].loc[u].values, ch[y].loc[v].values,
                         embeddings["specter2"][y].loc[u].values,
@@ -79,12 +93,16 @@ def rank_gaps(embeddings, graphs, cit_df, alpha=config.ALPHA_CHOICES[1],
                 "priority": round(gs * (vel[u] + vel[v]) / 2, 5),
                 "sim_history": hist,
             })
-    df = pd.DataFrame(rows).sort_values("priority", ascending=False)
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df, checked
+    df = df.sort_values("priority", ascending=False)
     return (df.head(top_k) if top_k else df).reset_index(drop=True), checked
 
 
 def retrospective_validate(embeddings, graphs, papers, cutoff=config.VALIDATION_CUTOFF,
-                           top_k=None, alpha=config.ALPHA_CHOICES[1]):
+                           top_k=None, alpha=config.ALPHA_CHOICES[1],
+                           sample_n=None):
     """Contribution 3: score gaps using only data <= cutoff, check post-cutoff.
 
     Returns (hits, total): how many of the top-K predicted gaps have both
@@ -95,8 +113,9 @@ def retrospective_validate(embeddings, graphs, papers, cutoff=config.VALIDATION_
     pre_graphs = {y: g for y, g in graphs.items() if y <= cutoff}
     pre_cits = _trim_citations(papers, cutoff) if not papers.empty else pd.DataFrame()
     ranked, checked = rank_gaps(pre_embs, pre_graphs, pre_cits, alpha=alpha,
-                                t=cutoff, t1=cutoff - 1, top_k=top_k)
-    if ranked.empty or checked == 0:
+                t=cutoff, t1=cutoff - 1, top_k=top_k,
+                sample_n=sample_n)
+    if checked == 0:
         return 0, 0
 
     # 2. Build post-cutoff paper text index for co-mention check
