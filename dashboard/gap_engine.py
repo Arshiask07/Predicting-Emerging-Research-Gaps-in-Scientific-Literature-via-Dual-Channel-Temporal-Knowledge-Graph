@@ -42,99 +42,188 @@ def rank_gaps(
     sample_n=None,       # if set, randomly sample this many nodes before pairing
     seed=42,
 ):
-    rows, checked = [], 0
-    ch = embeddings["node2vec"]
-    if t not in ch or t1 not in ch:
-        return pd.DataFrame(), checked
-    common = sorted(set(ch[t].index) & set(ch[t1].index))
-    if sample_n is not None and sample_n < len(common):
+    ch = embeddings.get("node2vec", {})
+    sp = embeddings.get("specter2", {})
+    if t not in ch or t1 not in ch or t not in sp or t1 not in sp:
+        return pd.DataFrame(), 0
+
+    common = sorted(set(ch[t].index) & set(ch[t1].index) & set(sp[t].index) & set(sp[t1].index))
+    if not common:
+        return pd.DataFrame(), 0
+
+    # 1. Precompute citation velocities once for all entities
+    vel_dict = {}
+    if cit_df is not None and not cit_df.empty and "entity_id" in cit_df.columns:
+        piv = cit_df.pivot(index="entity_id", columns="year", values="citations").fillna(0)
+        vel_end = min(t, config.VEL_WINDOW[1])
+        cols_avail = [c for c in piv.columns if c < vel_end]
+        vel_start = max(cols_avail) if cols_avail else (vel_end - 2)
+        if vel_end in piv.columns and vel_start in piv.columns and vel_end > vel_start:
+            vel_dict = ((piv[vel_end] - piv[vel_start]) / (vel_end - vel_start)).to_dict()
+
+    # 2. Node sampling: if min_vel > 0, prioritize nodes that meet min_vel
+    if min_vel > 0:
+        active_nodes = [n for n in common if vel_dict.get(n, 0.0) >= min_vel]
+        if active_nodes:
+            if sample_n and sample_n < len(common):
+                rng = np.random.default_rng(seed)
+                needed = min(sample_n, len(common))
+                n_active = min(len(active_nodes), max(1, needed // 2))
+                sel_active = rng.choice(active_nodes, size=n_active, replace=False).tolist()
+                rem = list(set(common) - set(sel_active))
+                n_rem = needed - n_active
+                sel_rem = rng.choice(rem, size=n_rem, replace=False).tolist() if n_rem > 0 and rem else []
+                common = sorted(sel_active + sel_rem)
+        else:
+            if sample_n and sample_n < len(common):
+                rng = np.random.default_rng(seed)
+                common = sorted(rng.choice(common, size=sample_n, replace=False).tolist())
+    elif sample_n and sample_n < len(common):
         rng = np.random.default_rng(seed)
         common = sorted(rng.choice(common, size=sample_n, replace=False).tolist())
 
-    for i, u in enumerate(common):
-        for v in common[i + 1:]:
-            if graphs.get(t) is not None and graphs[t].has_edge(u, v):
-                continue                                    # connected → not a gap
-            checked += 1
-            try:
-                sim_t = fused_sim(ch[t].loc[u].values, ch[t].loc[v].values,
-                                  embeddings["specter2"][t].loc[u].values,
-                                  embeddings["specter2"][t].loc[v].values, alpha)
-                sim_t1 = fused_sim(ch[t1].loc[u].values, ch[t1].loc[v].values,
-                                   embeddings["specter2"][t1].loc[u].values,
-                                   embeddings["specter2"][t1].loc[v].values, alpha)
-            except KeyError:
+    # 3. Vectorized cosine similarities using normalized NumPy matrices
+    sub_n_t = ch[t].loc[common].to_numpy(dtype=np.float32)
+    sub_n_t /= np.maximum(np.linalg.norm(sub_n_t, axis=1, keepdims=True), 1e-9)
+    sub_n_t1 = ch[t1].loc[common].to_numpy(dtype=np.float32)
+    sub_n_t1 /= np.maximum(np.linalg.norm(sub_n_t1, axis=1, keepdims=True), 1e-9)
+
+    sub_s_t = sp[t].loc[common].to_numpy(dtype=np.float32)
+    sub_s_t /= np.maximum(np.linalg.norm(sub_s_t, axis=1, keepdims=True), 1e-9)
+    sub_s_t1 = sp[t1].loc[common].to_numpy(dtype=np.float32)
+    sub_s_t1 /= np.maximum(np.linalg.norm(sub_s_t1, axis=1, keepdims=True), 1e-9)
+
+    sim_t_mat = alpha * (sub_n_t @ sub_n_t.T) + (1.0 - alpha) * (sub_s_t @ sub_s_t.T)
+    sim_t1_mat = alpha * (sub_n_t1 @ sub_n_t1.T) + (1.0 - alpha) * (sub_s_t1 @ sub_s_t1.T)
+    delta_mat = np.maximum(0.0, sim_t_mat - sim_t1_mat)
+    gs_mat = sim_t_mat * delta_mat
+
+    g = graphs.get(t) if graphs else None
+    rows = []
+    checked = 0
+    N = len(common)
+
+    for i in range(N):
+        u = common[i]
+        vel_u = max(0.0, vel_dict.get(u, 0.0))
+        for j in range(i + 1, N):
+            v = common[j]
+            if g is not None and g.has_edge(u, v):
                 continue
-            gs = sim_t * max(0.0, sim_t - sim_t1)           # Contribution 1
+            checked += 1
+            gs = float(gs_mat[i, j])
             if gs <= 0:
                 continue
-            vel = {}
-            for e in (u, v):
-                s = cit_df[cit_df.entity_id == e].set_index("year")["citations"] \
-                    if not cit_df.empty else pd.Series(dtype=float)
-                vel[e] = (s.get(config.VEL_WINDOW[1], 0)
-                          - s.get(config.VEL_WINDOW[0], 0)) / (
-                          config.VEL_WINDOW[1] - config.VEL_WINDOW[0])
-            if max(vel.values()) < min_vel:
+            vel_v = max(0.0, vel_dict.get(v, 0.0))
+            if min_vel > 0 and max(vel_u, vel_v) < min_vel:
                 continue
-            hist = {}
-            for y in ch:
-                if (u in ch[y].index and v in ch[y].index
-                        and v in embeddings["specter2"].get(y, pd.DataFrame()).index):
-                    hist[y] = round(fused_sim(
-                        ch[y].loc[u].values, ch[y].loc[v].values,
-                        embeddings["specter2"][y].loc[u].values,
-                        embeddings["specter2"][y].loc[v].values, alpha), 4)
+            sim_t_val = float(sim_t_mat[i, j])
+            delta_val = float(delta_mat[i, j])
+            mean_vel = (vel_u + vel_v) / 2.0
+            priority = gs * mean_vel if mean_vel > 0 else gs
             rows.append({
-                "u": u, "v": v, "sim_t": round(sim_t, 4),
-                "delta_sim": round(sim_t - sim_t1, 4),
+                "u": u, "v": v,
+                "sim_t": round(sim_t_val, 4),
+                "delta_sim": round(delta_val, 4),
                 "gap_score": round(gs, 5),
-                "vel_u": round(vel[u], 1), "vel_v": round(vel[v], 1),
-                "priority": round(gs * (vel[u] + vel[v]) / 2, 5),
-                "sim_history": hist,
+                "vel_u": round(vel_u, 1),
+                "vel_v": round(vel_v, 1),
+                "priority": round(priority, 5),
             })
+
     df = pd.DataFrame(rows)
     if df.empty:
         return df, checked
     df = df.sort_values("priority", ascending=False)
-    return (df.head(top_k) if top_k else df).reset_index(drop=True), checked
+    if top_k:
+        df = df.head(top_k).reset_index(drop=True)
+
+    # 4. Compute history only for final top-k gaps
+    hist_list = []
+    all_years = sorted(ch.keys())
+    for _, r in df.iterrows():
+        u, v = r.u, r.v
+        hist = {}
+        for y in all_years:
+            if (u in ch[y].index and v in ch[y].index and
+                y in sp and u in sp[y].index and v in sp[y].index):
+                vu_n = ch[y].loc[u].to_numpy()
+                vv_n = ch[y].loc[v].to_numpy()
+                vu_s = sp[y].loc[u].to_numpy()
+                vv_s = sp[y].loc[v].to_numpy()
+                cos_n = float(np.dot(vu_n, vv_n) / (np.linalg.norm(vu_n) * np.linalg.norm(vv_n) + 1e-9))
+                cos_s = float(np.dot(vu_s, vv_s) / (np.linalg.norm(vu_s) * np.linalg.norm(vv_s) + 1e-9))
+                hist[y] = round(alpha * cos_n + (1.0 - alpha) * cos_s, 4)
+        hist_list.append(hist)
+    df["sim_history"] = hist_list
+
+    return df, checked
 
 
-def retrospective_validate(embeddings, graphs, papers, cutoff=config.VALIDATION_CUTOFF,
+def retrospective_validate(embeddings, graphs, papers, ents=None, cutoff=config.VALIDATION_CUTOFF,
                            top_k=None, alpha=config.ALPHA_CHOICES[1],
-                           sample_n=None):
+                           sample_n=400, seed=42, return_df=False):
     """Contribution 3: score gaps using only data <= cutoff, check post-cutoff.
 
-    Returns (hits, total): how many of the top-K predicted gaps have both
-    concepts co-mentioned in at least one paper published after the cutoff.
+    Returns (hits, total) or (hits, total, top_hits_df) if return_df is True.
     """
-    # 1. Score gaps at cutoff time using pre-cutoff embeddings & graphs
     pre_embs = _trim_embeddings(embeddings, cutoff)
     pre_graphs = {y: g for y, g in graphs.items() if y <= cutoff}
     pre_cits = _trim_citations(papers, cutoff) if not papers.empty else pd.DataFrame()
     ranked, checked = rank_gaps(pre_embs, pre_graphs, pre_cits, alpha=alpha,
-                t=cutoff, t1=cutoff - 1, top_k=top_k,
-                sample_n=sample_n)
-    if checked == 0:
-        return 0, 0
+                                t=cutoff, t1=cutoff - 1, top_k=top_k,
+                                sample_n=sample_n, seed=seed)
+    if checked == 0 or ranked.empty:
+        return (0, 0, pd.DataFrame()) if return_df else (0, 0)
 
-    # 2. Build post-cutoff paper text index for co-mention check
+    # Build surface tokens for entities
+    from collections import defaultdict
+    ent_surfaces = defaultdict(set)
+    if ents is not None and not ents.empty and "label" in ents.columns:
+        for _, r in ents.iterrows():
+            lbl = str(r.label or r.entity_id).lower()
+            for tok in re.findall(r"[a-z]+", lbl):
+                if len(tok) >= 4:
+                    ent_surfaces[r.entity_id].add(tok)
+
+    # Build post-cutoff paper text token index for co-mention check
     post = papers[papers.year > cutoff]
     if post.empty:
-        return 0, checked
+        return (0, len(ranked), pd.DataFrame()) if return_df else (0, len(ranked))
 
-    post_texts = (post.title.fillna("") + " " + post.abstract.fillna("")).str.lower().tolist()
+    post_paper_idx = []
+    for _, row in post.iterrows():
+        txt = (str(row.title) + " " + str(row.abstract)).lower()
+        toks = {t for t in re.findall(r"[a-z]+", txt) if len(t) >= 4}
+        if toks:
+            post_paper_idx.append(toks)
 
-    # 3. For each predicted gap, check if both concepts co-appear in any post-cutoff paper
+    # Check if predicted concept pairs co-occur in any post-cutoff paper
     hits = 0
+    hit_rows = []
     for _, row in ranked.iterrows():
-        u, v = str(row.u).lower(), str(row.v).lower()
-        for txt in post_texts:
-            if u in txt and v in txt:
-                hits += 1
-                break
+        u_surf = ent_surfaces.get(row.u, set())
+        v_surf = ent_surfaces.get(row.v, set())
+        if not u_surf:
+            u_surf = {t for t in re.findall(r"[a-z]+", str(row.u).lower()) if len(t) >= 4}
+        if not v_surf:
+            v_surf = {t for t in re.findall(r"[a-z]+", str(row.v).lower()) if len(t) >= 4}
 
-    return hits, checked
+        materialized = False
+        if u_surf and v_surf:
+            for p_toks in post_paper_idx:
+                if (u_surf & p_toks) and (v_surf & p_toks):
+                    materialized = True
+                    break
+        if materialized:
+            hits += 1
+            hit_rows.append(row)
+
+    total_candidates = len(ranked)
+    hit_df = pd.DataFrame(hit_rows)
+    if return_df:
+        return hits, total_candidates, hit_df
+    return hits, total_candidates
 
 
 def _trim_embeddings(embeddings, cutoff):
@@ -149,12 +238,10 @@ def _trim_citations(papers, cutoff):
     """Build entity→citation history from papers <= cutoff only."""
     if papers.empty:
         return pd.DataFrame()
-    # Map paper-year to entities via keyword overlap (demo-friendly)
     from collections import defaultdict
     ent_cites = defaultdict(lambda: defaultdict(int))
     for _, row in papers[papers.year <= cutoff].iterrows():
         txt = (str(row.title) + " " + str(row.abstract)).lower()
-        # crude: count each unique word as an "entity" citation
         for tok in set(re.findall(r"[a-z]+", txt)):
             if len(tok) > 3:
                 ent_cites[tok][int(row.year)] += 1

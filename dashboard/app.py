@@ -2,6 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import plotly.graph_objects as go
 import networkx as nx
+import pandas as pd
 from pyvis.network import Network
 from pathlib import Path
 import sys
@@ -22,11 +23,14 @@ st.sidebar.title("⚙️ Controls")
 domain = st.sidebar.selectbox("Domain", list(config.DOMAINS))
 alpha = st.sidebar.select_slider(
     "Fusion weight α",
-    options=[0.0, 0.3, 0.5, 0.7, 1.0], value=0.5,
-    help="Matches ablation sweep {0.3, 0.5, 0.7}. "
-         "1.0 = pure structural, 0.0 = pure citation-semantic.")
-min_vel = st.sidebar.number_input("Min citation velocity", 0, 500, 5)
-top_k = st.sidebar.slider("Show top-K gaps", 5, 50, 15)
+    options=config.REAL_ALPHAS, value=0.5,
+    help="α = 0.0 is pure semantic (SPECTER), α = 1.0 is pure structural "
+         "(Node2Vec). These are the five values the real pipeline was run with.")
+min_vel = st.sidebar.number_input(
+    "Min mention velocity", min_value=0.0, max_value=50.0, value=0.0, step=0.5,
+    help="Drop pairs whose mean entity velocity falls below this. Default 0.0 "
+         "keeps everything, including entities that are declining (negative velocity).")
+top_k = st.sidebar.slider("Show top-K gaps", 5, 100, 15)
 
 # Cache version key — increment when user explicitly requests recompute
 if "version" not in st.session_state:
@@ -97,62 +101,113 @@ with tab_overview:
                            margin=dict(t=40, b=10))
         st.plotly_chart(figg, use_container_width=True)
 
-# ── Tab 2: Ranked gaps ────────────────────────────────────────────────
+# ── Tab 2: Ranked gaps (real pipeline: Component 5 + Component 6) ────────
+# Reads the FAISS-ranked gap files written by component5/04_fuse_and_rank.py
+# and the velocity re-ranked files from component6/03_rerank.py. These use real
+# Node2Vec + SPECTER embeddings; the synthetic demo embeddings in exports/ are
+# NOT used for this tab.
 with tab_gaps:
-    # Only recompute when user explicitly asks — slider changes don't trigger it
-    compute_key = f"gaps_{domain.replace(' ', '_')}_{alpha}_{min_vel}"
-    if compute_key not in st.session_state:
-        st.session_state[compute_key] = None
-
-    col_btn, col_info = st.columns([1.5, 4])
-    with col_btn:
-        if st.button("🔄 Score gaps", type="primary", use_container_width=True):
-            with st.spinner(f"Scoring {top_k} gaps (α={alpha}, sample_n=400)…"):
-                try:
-                    gaps, checked = ge.rank_gaps(
-                        embs, graphs, cits, alpha=alpha,
-                        min_vel=min_vel, top_k=top_k,
-                        sample_n=400,
-                    )
-                    st.session_state[compute_key] = (gaps, checked)
-                except Exception as e:
-                    st.error(f"Gap scoring failed: {e}")
-                    st.session_state[compute_key] = (None, 0)
-
-    gaps_data = st.session_state.get(compute_key)
-    if gaps_data is None:
-        st.warning("Click **Score gaps** to compute the top-ranked research gaps.")
+    gap_years = dl.available_gap_years(domain)
+    if not gap_years:
+        st.error(
+            f"No ranked gap files found for **{domain}**. Run the real pipeline:\n\n"
+            "```\n"
+            f"python component5/04_fuse_and_rank.py --domain {config.DOMAIN_SHORT.get(domain)}\n"
+            "```"
+        )
     else:
-        gaps, checked = gaps_data
-        if gaps is None or gaps.empty:
-            st.warning("No gaps found. Try a different α or domain, or check "
-                       "that embedding CSVs exist in `dashboard/exports/`.")
+        c_year, c_alpha, c_source = st.columns([1, 1, 1.4])
+        with c_year:
+            gap_year = st.selectbox("Snapshot year", gap_years,
+                                    index=len(gap_years) - 1)
+        with c_alpha:
+            gap_alpha = st.select_slider("α", options=config.REAL_ALPHAS,
+                                         value=alpha)
+        with c_source:
+            source = st.radio(
+                "Ranking", ["Fused (Comp 5)", "Velocity re-ranked (Comp 6)"],
+                horizontal=True,
+                help="Comp 5 ranks by fused cosine similarity. Comp 6 re-ranks "
+                     "those same pairs by priority = fused × mean(velocity).")
+
+        use_reranked = source.startswith("Velocity")
+        gaps = dl.load_real_gaps(domain, gap_year, gap_alpha, reranked=use_reranked)
+        _, vel_path = dl.load_entity_velocity(domain)
+
+        if gaps is None:
+            st.warning(
+                f"No `{source}` file for {config.DOMAIN_SHORT.get(domain)} "
+                f"{gap_year} α={gap_alpha}. "
+                + ("Run `component6/03_rerank.py` to produce it."
+                   if use_reranked else
+                   "Run `component5/04_fuse_and_rank.py` to produce it.")
+            )
+        elif gaps.empty:
+            st.warning("That gap file is empty — try a different year or α.")
         else:
-            with col_info:
-                st.info(f"Scored **{checked:,}** unconnected concept pairs · "
-                        f"priority(u,v) = [α·sim_n2v + (1−α)·sim_sp2](t) × Δsim × mean(vel)")
-            for i, row in gaps.iterrows():
-                with st.container(border=True):
-                    col_r, col_pair, col_m = st.columns([0.07, 0.38, 0.55])
-                    col_r.markdown(f"### {i+1}")
-                    col_pair.markdown(
-                        f"**{row.u}** ⟷ **{row.v}**\n\n"
-                        f"`sim_t={row.sim_t}` · `Δsim={row.delta_sim}`\n\n"
-                        f"`vel(u)={row.vel_u}` · `vel(v)={row.vel_v}`")
-                    m1, m2, m3 = col_m.columns(3)
-                    m1.metric("Gap score", row.gap_score)
-                    m2.metric("Priority", row.priority)
-                    m3.metric("Mean velocity", round((row.vel_u + row.vel_v) / 2, 1))
-                    if row.sim_history:
-                        tf = go.Figure(go.Scatter(
-                            x=list(row.sim_history.keys()),
-                            y=list(row.sim_history.values()),
-                            mode="lines+markers", line=dict(color="#f59e0b")))
-                        tf.update_layout(height=140,
-                                         margin=dict(l=0, r=0, t=5, b=0),
-                                         yaxis_range=[-0.05, 1.05],
-                                         yaxis_title="fused sim")
-                        col_m.plotly_chart(tf, use_container_width=True)
+            # Optional velocity floor, applied client-side.
+            if use_reranked and "vel_u" in gaps.columns and min_vel > 0:
+                mean_vel = (gaps.vel_u + gaps.vel_v) / 2
+                n_before = len(gaps)
+                gaps = gaps[mean_vel >= min_vel].reset_index(drop=True)
+                st.info(f"Velocity floor ≥ {min_vel}: kept {len(gaps):,} of "
+                        f"{n_before:,} candidate pairs.")
+                gaps_empty = gaps.empty
+            else:
+                gaps_empty = False
+
+            if gaps_empty:
+                st.warning(f"No pairs survive the velocity floor of {min_vel}.")
+            else:
+                shown = gaps.head(top_k)
+                n_pool = len(gaps)
+                n_checked = 0  # real pipeline pre-filters; see note below
+
+                src = "Component 6 (velocity re-ranked)" if use_reranked \
+                    else "Component 5 (FAISS fused ranking)"
+                st.caption(
+                    f"**{src}** · {config.DOMAIN_SHORT.get(domain)} · "
+                    f"{gap_year} · α={gap_alpha} · showing {len(shown)} of "
+                    f"{n_pool:,} ranked candidates (top-500 pool). "
+                    f"Velocity signal: "
+                    + ("mention counts (S2 API unreachable)" if vel_path == "mention"
+                       else "Semantic Scholar citation counts")
+                )
+
+                for i, row in shown.iterrows():
+                    with st.container(border=True):
+                        col_r, col_pair, col_m = st.columns([0.06, 0.44, 0.50])
+                        col_r.markdown(f"### {i+1}")
+                        name_a = row.surface_form_a or row.entity_a
+                        name_b = row.surface_form_b or row.entity_b
+                        col_pair.markdown(
+                            f"**{name_a}** ⟷ **{name_b}**\n\n"
+                            f"<span style='color: #64748b; font-size: 0.82em;'>"
+                            f"`{row.entity_a}` ⟷ `{row.entity_b}`</span>",
+                            unsafe_allow_html=True,
+                        )
+                        m = col_m.columns(3)
+                        if use_reranked:
+                            m[0].metric("Priority", row.priority)
+                            m[1].metric("Fused sim", row.fused_score)
+                            m[2].metric("Mean vel",
+                                        round((row.vel_u + row.vel_v) / 2, 2))
+                        else:
+                            m[0].metric("Fused sim", row.fused_score)
+                            m[1].metric("Structural",
+                                        round(row.structural_score, 3)
+                                        if pd.notna(row.structural_score) else "—")
+                            m[2].metric("Semantic",
+                                        round(row.semantic_score, 3)
+                                        if pd.notna(row.semantic_score) else "—")
+
+                st.caption(
+                    "Pairs have no direct edge of any relation type in the "
+                    "cumulative graph for this year. The pool was built by FAISS "
+                    "top-20 neighbour retrieval over fused vectors, then "
+                    "near-duplicate surface forms were filtered "
+                    "(Levenshtein ≥ 0.75 or token-set ≥ 0.90)."
+                )
 
 # ── Tab 3: Graph timeline ─────────────────────────────────────────────
 with tab_graph:
@@ -269,28 +324,47 @@ with tab_validate:
 
     if val_mode.startswith("Demo"):
         st.info("Using frozen demo embeddings from `dashboard/exports/`.")
+        demo_key = f"demo_val_{domain.replace(' ', '_')}_{alpha}_{top_k}"
         if st.button("▶ Run demo validation", type="primary"):
             with st.spinner(f"Re-scoring gaps at t={config.VALIDATION_CUTOFF}…"):
                 try:
-                    hits, total = ge.retrospective_validate(
-                        embs, graphs, papers, cutoff=config.VALIDATION_CUTOFF,
-                        top_k=top_k, alpha=alpha)
-                    if total == 0:
-                        st.error("No candidate gaps could be scored at the cutoff year — "
-                                 "check that pre-cutoff embeddings exist.")
-                    elif hits == 0:
-                        st.warning(f"0/{total} predicted gaps realized post-cutoff. "
-                                   "(Expected with demo embeddings.)")
-                    else:
-                        rate = hits / total
-                        st.success(f"Demo hit rate @top-{top_k}: **{rate:.1%}** "
-                                   f"({hits}/{total})")
+                    hits, total, top_hits_df = ge.retrospective_validate(
+                        embs, graphs, papers, ents=ents, cutoff=config.VALIDATION_CUTOFF,
+                        top_k=top_k, alpha=alpha, sample_n=400, return_df=True)
+                    st.session_state[demo_key] = (hits, total, top_hits_df)
                 except Exception as e:
                     st.error(f"Demo validation failed: {e}")
+                    st.session_state[demo_key] = None
+
+        if demo_key in st.session_state and st.session_state[demo_key] is not None:
+            hits, total, top_hits_df = st.session_state[demo_key]
+            if total == 0:
+                st.error("No candidate gaps could be scored at the cutoff year — "
+                         "check that pre-cutoff embeddings exist.")
+            elif hits == 0:
+                st.warning(f"0/{total} predicted gaps realized post-cutoff.")
+            else:
+                rate = hits / total
+                st.success(f"Demo hit rate @top-{top_k}: **{rate:.1%}** "
+                           f"({hits}/{total})")
+                if top_hits_df is not None and not top_hits_df.empty:
+                    st.subheader("Top materialized gaps (post-cutoff)")
+                    ent_map = {}
+                    if ents is not None and not ents.empty and "label" in ents.columns:
+                        ent_map = dict(zip(ents.entity_id, ents.label))
+                    for idx, h in top_hits_df.head(10).reset_index(drop=True).iterrows():
+                        u_name = ent_map.get(h["u"], h["u"])
+                        v_name = ent_map.get(h["v"], h["v"])
+                        st.markdown(
+                            f"{idx + 1}. **{u_name}** ⟷ **{v_name}**  \n"
+                            f"&nbsp;&nbsp;&nbsp;&nbsp;<small style='color: #64748b;'>`{h['u']}` ⟷ `{h['v']}` · gap_score={h.get('gap_score', 0):.4f}</small>",
+                            unsafe_allow_html=True,
+                        )
 
     else:
         st.info("Loading real Component 2 extraction outputs from "
                 "`component2_entity_relation_extraction/output/`.")
+        real_key = f"real_val_{domain.replace(' ', '_')}_{alpha}_{top_k}"
         if st.button("▶ Run real-data validation", type="primary"):
             try:
                 import component3_retrospective_validation as c3
@@ -307,30 +381,43 @@ with tab_validate:
                             out_dir=Path(__file__).resolve().parent
                             / "exports" / "component3_real_validation",
                         )
-                        if report["status"] == "ok":
-                            rate = report["hit_rate"]
-                            st.success(
-                                f"Real-data hit rate @top-{top_k} "
-                                f"(cutoff {config.VALIDATION_CUTOFF}): "
-                                f"**{rate:.1%}** ({report['hits']}/{report['candidate_gaps_scored']})"
-                            )
-                            st.info(
-                                f"{report['entities_considered']:,} entities · "
-                                f"{report['relations_considered']:,} relations · "
-                                f"{report['papers_pre_cutoff']:,} pre-cutoff papers · "
-                                f"{report['papers_post_cutoff']:,} post-cutoff papers · "
-                                f"{report['elapsed_seconds']}s"
-                            )
-                            if report["top_hits"]:
-                                st.subheader("Top materialized gaps")
-                                for i, h in enumerate(report["top_hits"][:10], 1):
-                                    st.write(f"{i}. **{h['u']}** ⟷ **{h['v']}** "
-                                             f"— {h['pre_cutoff_cooccurrences']} pre-cutoff "
-                                             f"co-occurrences, first seen {h['year_first_seen']}")
-                        else:
-                            st.warning(f"Validation skipped: {report.get('reason', 'unknown')}")
+                        st.session_state[real_key] = report
                     except Exception as e:
                         st.error(f"Real-data validation failed: {e}")
+                        st.session_state[real_key] = None
+
+        if real_key in st.session_state and st.session_state[real_key] is not None:
+            report = st.session_state[real_key]
+            if report.get("status") == "ok":
+                rate = report["hit_rate"]
+                st.success(
+                    f"Real-data hit rate @top-{top_k} "
+                    f"(cutoff {config.VALIDATION_CUTOFF}): "
+                    f"**{rate:.1%}** ({report['hits']}/{report['candidate_gaps_scored']})"
+                )
+                st.info(
+                    f"{report['entities_considered']:,} entities · "
+                    f"{report['relations_considered']:,} relations · "
+                    f"{report['papers_pre_cutoff']:,} pre-cutoff papers · "
+                    f"{report['papers_post_cutoff']:,} post-cutoff papers · "
+                    f"{report['elapsed_seconds']}s"
+                )
+                if report.get("top_hits"):
+                    st.subheader("Top materialized gaps (post-cutoff)")
+                    ent_map = {}
+                    if ents is not None and not ents.empty and "label" in ents.columns:
+                        ent_map = dict(zip(ents.entity_id, ents.label))
+                    for i, h in enumerate(report["top_hits"][:10], 1):
+                        u_name = ent_map.get(h["u"], h["u"])
+                        v_name = ent_map.get(h["v"], h["v"])
+                        extra = f"gap_score={h['gap_score']:.4f}" if "gap_score" in h else f"{h.get('pre_cutoff_cooccurrences', 0)} pre-cutoff co-occurrences"
+                        st.markdown(
+                            f"{i}. **{u_name}** ⟷ **{v_name}**  \n"
+                            f"&nbsp;&nbsp;&nbsp;&nbsp;<small style='color: #64748b;'>`{h['u']}` ⟷ `{h['v']}` · {extra}</small>",
+                            unsafe_allow_html=True,
+                        )
+            else:
+                st.warning(f"Validation skipped: {report.get('reason', 'unknown')}")
 
 st.divider()
 st.caption("Frozen snapshot — no live API calls. Data source: "
