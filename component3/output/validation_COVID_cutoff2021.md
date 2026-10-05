@@ -18,11 +18,11 @@
 
 | Metric | Value |
 |---|---|---|
-| Candidate gaps scored | 75 |
-| Hits (materialized) | 27 |
-| Misses (not materialized) | 48 |
-| **Hit rate** | **36.00%** |
-| Wall-clock time | 33.74 s |
+| Candidate gaps scored | 45 |
+| Hits (materialized) | 17 |
+| Misses (not materialized) | 28 |
+| **Hit rate** | **37.78%** |
+| Wall-clock time | 26.38 s |
 | Scoring method | embedding |
 
 ## Top materialized gaps (post-cutoff co-mentions)

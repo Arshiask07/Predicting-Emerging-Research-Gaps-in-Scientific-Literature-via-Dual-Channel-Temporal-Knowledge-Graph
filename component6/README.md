@@ -1,12 +1,12 @@
 # Component 6 — Citation Velocity Re-ranking Engine
 
-**Status:** Implemented (4 scripts + README).  Ready to run end-to-end.
-
+**Status:** Complete — all 4 scripts written and run end-to-end for both domains.
+**Last run:** 2026-09-21 (mention-velocity path; see §2)
 **Folder:** `component6/`  
 **Output:** `component6/output/`  
 **Dependencies:** requests, numpy, json (stdlib) — no torch/transformers/faiss needed  
 **GPU:** Not required.  All scripts are CPU-only.  
-**Network:** Only `01_fetch_citations.py` makes external calls (Semantic Scholar API).  
+**Network:** Only `01_fetch_citations.py` attempts external calls (Semantic Scholar API).  Not required — see §2.  
 **Neo4j:** Not required.  
 **Components 1–5:** Untouched.  Component 6 reads from them (read-only) and writes only to `component6/output/`.
 
@@ -14,14 +14,14 @@
 
 ## 1. Overview
 
-Component 6 takes Component 5's ranked research gaps and re-ranks them by **citation velocity** — how fast the literature is growing around each entity.  A gap connecting two fast-growing entities gets a higher priority, surfacing the "emerging" research opportunities.
+Component 6 takes Component 5's ranked research gaps and re-ranks them by **entity velocity** — how fast the literature is growing around each entity.  A gap connecting two fast-growing entities gets a higher priority, surfacing the "emerging" research opportunities.
 
 **Pipeline:**
 
 ```
 Component 5 gaps  ──→ 01_fetch_citations  ──→ per-paper citation counts (S2 API)
                          │
-                         └─→ [fallback] mention velocity from entities.json
+                         └─→ [default] mention velocity from entities.json
                                       │
 02_entity_velocity  ←─────────────────┘   entity×year velocity matrix
                                       │
@@ -38,8 +38,7 @@ vel(e) = (c_e[y2] − c_e[y1]) / (y2 − y1)
 
 where `(y1, y2) = VEL_WINDOW = (2022, 2024)` (matching `dashboard/config.py`).
 
-`c_e[y]` = sum of citation counts of papers mentioning entity `e` in year `y` (citation path)  
-or = count of papers mentioning `e` in year `y` (mention-velocity fallback).
+`c_e[y]` = count of papers from year `y` mentioning entity `e` (default mention-velocity path), or = sum of citation counts of those papers when the Semantic Scholar path is available.
 
 **Priority formula:**
 
@@ -51,36 +50,60 @@ Pairs where both entities have low velocity get `priority ≈ 0` and sink to the
 
 ---
 
-## 2. Citation acquisition — two paths
+## 2. Velocity signal — mention velocity is the default
 
-**Critical data reality:** No citation counts exist anywhere in the corpus or Component 2 outputs.  The Semantic Scholar enrichment step (data_collection step 2a) was never run.
+**Current state of the run:** The Semantic Scholar API was unreachable from this
+machine (institutional access required), so the citation caches are empty and
+the pipeline ran entirely on **mention velocity**. The `FALLBACK.txt` flags in
+`output/citations/` record this. This is the intended operating mode here, not
+a degraded mode.
 
-### Primary path: Semantic Scholar API
+### Default path: mention velocity (no network required)
 
-`01_fetch_citations.py` extracts unique `paper_id`s from `component2/entities.json`, looks up each paper's `citationCount` via the S2 search API (title match, `limit=1`), and caches the result to `component6/output/citations/{domain}_paper_citations.json`.
+`c_e[y] = ` count of papers from year `y` mentioning entity `e`, computed entirely
+from Component 2's `entities.json` (which carries `paper_id` and `year` per
+entity mention). Fully reproducible offline, no API key, no rate limits.
 
-- API key: `S2_API_KEY` env var (optional — raises rate limit from ~100 req/5min to 1 req/s sustained)
-- Rate limit: ~1 req/s (3.5s delay without key)
-- Cache: one-time cost per domain; `--force` to refetch
+**Interpretation:** mention velocity measures publication volume, not citation
+impact. With 200 NLP / 140 COVID papers per year, most velocities are small
+multiples of 0.5. This must be stated whenever velocity numbers are reported.
 
-### Fallback path: mention velocity
+### Optional path: Semantic Scholar citations
 
-If the S2 API is unreachable or blocked, `01_fetch_citations.py` writes empty citation caches + a `FALLBACK.txt` flag and exits 0.  The rest of the pipeline detects the flag and uses **mention velocity** instead: `c_e[y] = count of papers mentioning entity e in year y`, computed entirely from Component 2's `entities.json` (which carries `paper_id` and `year` per entity mention).
+`01_fetch_citations.py` extracts unique `paper_id`s from `entities.json`,
+looks up each paper's `citationCount` via the S2 search API (title match,
+`limit=1`), and caches to `output/citations/{domain}_paper_citations.json`.
 
-Mention velocity is a weaker signal than citation velocity (it measures publication volume, not impact), but it is fully reproducible offline and never requires network access.
+- Requires an `S2_API_KEY` env var and institutional network access.
+- Rate limit: ~1 req/s with key, ~3.5s between requests without.
+- If the API is unreachable, the script writes empty caches + a `FALLBACK.txt`
+  flag and exits 0 — it never fabricates data.
 
-**Never silently substitute fake data.**  If neither path works, the pipeline stops with a clear blocker report instead of proceeding with fabricated inputs.
+To retry later:
+
+```bash
+export S2_API_KEY=your_key_here
+rm component6/output/citations/{NLP,COVID}_FALLBACK.txt
+python component6/01_fetch_citations.py --force
+python component6/02_entity_velocity.py --force
+python component6/03_rerank.py --force
+python component6/04_evaluate.py --force
+```
+
+Every output file records which path was used. If `FALLBACK.txt` exists, the
+mention-velocity path was active.
 
 ---
 
 ## 3. Run order
 
-Run the scripts in order 1 → 4.  Each script validates its inputs on startup and raises explicit `FileNotFoundError` with the exact missing path if a prerequisite is missing.  Re-running skips completed stages unless `--force` is passed.
+Run the scripts in order 1 → 4. Each script validates its inputs on startup and raises explicit `FileNotFoundError` with the exact missing path if a prerequisite is missing. Re-running skips completed stages unless `--force` is passed.
 
 ```bash
 # All commands run from /Users/anjan/Desktop/capstone_sep_15/
+# Use /opt/anaconda3/bin/python3 on this machine (Homebrew Python 3.14 has no deps)
 
-# Step 1: Fetch citation counts from S2 API (or set up fallback)
+# Step 1: Fetch citation counts from S2 API (optional — falls back to mention velocity)
 python3 component6/01_fetch_citations.py --force
 
 # Step 2: Compute entity velocities from citation cache (or mention counts)
@@ -222,20 +245,44 @@ No torch/transformers/faiss/networkx/node2vec needed — those are Component 5's
 
 ## 8. Definition of done checklist
 
-- [ ] All 4 scripts exist under `component6/`
-- [ ] 01 runs end-to-end, produces citation caches (or fallback flags)
-- [ ] 02 runs end-to-end, produces entity_velocity_{NLP,COVID}.json + build logs
-- [ ] 03 runs end-to-end, produces 130 re-ranked files in reranked/
-- [ ] 04 runs end-to-end, produces ablation_velocity_{NLP,COVID}.json + .md + top_velocity_gaps_latest.json
-- [ ] README documents run order, flags, velocity + priority formulas, citation path
-- [ ] working_log.md records environment check, files created, test results, blockers
-- [ ] Every script validates inputs (explicit FileNotFoundError with exact path)
-- [ ] --force flag works on every script
-- [ ] JSON build logs + wall-clock + tracemalloc timing per script
-- [ ] NLP and COVID processed separately; canonical_id is the entity key
-- [ ] Citation path (API vs mention-velocity fallback) clearly logged everywhere
-- [ ] Nothing outside component6/ was modified
-- [ ] Re-running skips completed stages (--force to redo)
+Verified against the actual contents of `component6/output/` on 2026-09-30.
+
+- [x] All 4 scripts exist under `component6/`
+- [x] 01 runs end-to-end, produces citation caches + fallback flags
+      (`citations/{NLP,COVID}_paper_citations.json` = `{}`, both `*_FALLBACK.txt` present — S2 unreachable)
+- [x] 02 runs end-to-end, produces `entity_velocity_{NLP,COVID}.json` + build logs
+      (`entity_velocity_NLP.json` records `"path": "mention-velocity (fallback)"`)
+- [x] 03 runs end-to-end, produces re-ranked files in `reranked/`
+      (65 `.json` + 65 `_meta.json` = 130 files)
+- [x] 04 runs end-to-end, produces `ablation_velocity_{NLP,COVID}.json` + `.md`
+      + `top_velocity_gaps_{NLP,COVID}_latest.json`
+- [x] README documents run order, flags, velocity + priority formulas, citation path
+- [x] `working_log.md` records environment check, files created, run results, blockers
+- [x] Every script validates inputs (explicit `FileNotFoundError` with exact path)
+- [x] `--force` flag works on every script
+- [x] JSON build logs + wall-clock + tracemalloc timing per script
+- [x] NLP and COVID processed separately; `canonical_id` is the entity key
+- [x] Citation path (API vs mention-velocity) clearly logged everywhere
+- [x] Nothing outside `component6/` was modified
+- [x] Re-running skips completed stages (`--force` to redo)
+
+### File count reconciliation
+
+The 130 re-ranked files = 65 gap files × 2 (`.json` + `_meta.json`).
+
+The 65 gap files break down as:
+- **NLP:** 7 years (2018–2024) × 5 alphas (0, 0.25, 0.5, 0.75, 1) = 35
+- **COVID:** 6 years (2019–2024) × 5 alphas = 30
+
+Earlier drafts of this README said "130 re-ranked files" meaning 130 gap
+*payloads*. The actual payload count is 65; 130 is the file count including
+metadata sidecars.
+
+### Known limitation carried into the results
+
+The velocity signal is **mention count**, not citation count, so it measures
+publication volume rather than impact. This bounds what the velocity
+re-ranking ablation can claim — see §2 and the paper's Limitations section.
 
 ---
 

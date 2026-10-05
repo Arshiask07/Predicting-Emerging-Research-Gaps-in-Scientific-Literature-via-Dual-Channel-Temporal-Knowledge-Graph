@@ -61,20 +61,48 @@ Component6/working_log.md
    - --force, --domain, --cutoff selectors
    - Input validation: raises FileNotFoundError if fused or velocity gaps files missing
 
-### Pending / Not Yet Run
+### Run Results (2026-09-21)
 
-- 01_fetch_citations.py — pending (requires network access to api.semanticscholar.org; may fall back to mention velocity)
-- 02_entity_velocity.py — pending (depends on 01 output)
-- 03_rerank.py — pending (depends on 02 output)
-- 04_evaluate.py — pending (depends on 03 output)
-- README.md — written
-- working_log.md — this file
+All four scripts ran end-to-end for both domains. Verified against the contents
+of `component6/output/` on 2026-09-30.
 
-### Blockers
+| Script | Result |
+|--------|--------|
+| `01_fetch_citations.py` | S2 API unreachable → wrote empty caches `{}` + `NLP_FALLBACK.txt` + `COVID_FALLBACK.txt`, exited 0 as designed |
+| `02_entity_velocity.py` | Produced `entity_velocity_{NLP,COVID}.json`; each records `"path": "mention-velocity (fallback)"` and `vel_window: [2022, 2024]` |
+| `03_rerank.py` | Produced 65 gap files + 65 `_meta.json` sidecars in `reranked/` |
+| `04_evaluate.py` | Produced `ablation_velocity_{NLP,COVID}.{json,md}` + `top_velocity_gaps_{NLP,COVID}_latest.json` |
 
-- S2 API reachability: api.semanticscholar.org may be blocked in some environments (the original data_collection script noted HTTP 403 in a sandbox). If blocked, the fallback path (mention velocity) is fully functional and the pipeline proceeds — just with a weaker signal.
-- S2_API_KEY env var: not set by default; without it, rate limit is ~3.5s per request. With NLP ~10,000+ unique papers, this could take a long time. COVID has fewer papers. A key is strongly recommended for the primary path.
-- No citation counts exist anywhere — the S2 enrichment was never run, so 01 is a one-time cost to populate the citation cache.
+**File count reconciliation:** 65 gap payloads = NLP 7 years (2018–2024) × 5
+alphas + COVID 6 years (2019–2024) × 5 alphas = 35 + 30. With `_meta.json`
+sidecars that is 130 files total in `reranked/`.
+
+**Velocity signal used:** mention count, not citation count, because the S2 API
+was unreachable. Entity velocities in the reported ablation are therefore
+publication-volume growth, not citation impact.
+
+### Citation Path Decision (revised 2026-09-30)
+
+Original framing treated S2 citations as the "primary" path with mention
+velocity as a degraded fallback. That was wrong for this environment: S2
+requires institutional access that is not available, so the mention-velocity
+path is the **default and intended** operating mode, not a degradation. README
+§2 now leads with mention velocity and demotes the S2 path to optional.
+
+### Dashboard Integration (2026-09-30)
+
+`dashboard/` Tab 2 ("Top Gaps") previously re-derived gaps from the synthetic
+demo embeddings in `dashboard/exports/` (which are `np.random.randn` vectors
+from `make_demo_embeddings.py`), not from this component's output. It now reads
+`component6/output/reranked/` directly via `data_loader.load_real_gaps(...,
+reranked=True)` alongside the Component 5 files, and labels which citation path
+produced the velocities.
+
+### Pending / Future Work
+
+- Retry `01_fetch_citations.py` if institutional Semantic Scholar access is
+  obtained, to move from mention velocity to citation velocity.
+- No functional gaps remain in the pipeline itself.
 
 ### Verification of read-only constraint
 

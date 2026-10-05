@@ -1,0 +1,478 @@
+\documentclass{ieeeaccess}
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{booktabs}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+\history{Date of publication xxxx 00, 0000, date of current version xxxx 00, 0000.}
+\doi{10.1109/ACCESS.2017.DOI}
+
+\title{Predicting Emerging Research Gaps in Scientific Literature via Dual-Channel Temporal Knowledge Graphs}
+\author{
+\uppercase{Arshia Shaik}\authorrefmark{1},
+\uppercase{Yasaswi Anjan Ch}\authorrefmark{1},
+\uppercase{Vasu Dhaniyala}\authorrefmark{1},
+and \uppercase{Ratna Chowdary N}\authorrefmark{1}
+}
+\address[1]{School of Computer Science and Engineering,
+VIT-AP University, Amaravati, Andhra Pradesh, India}
+
+
+
+\markboth
+{Author \headeretal: Preparation of Papers for IEEE TRANSACTIONS and JOURNALS}
+{Author \headeretal: Preparation of Papers for IEEE TRANSACTIONS and JOURNALS}
+
+\corresp{Corresponding author: First A. Author (e-mail: author@ boulder.nist.gov).}
+
+\begin{abstract}
+Scientific literature is growing at a pace no individual researcher can track manually, with millions of new papers indexed each year. Existing discovery tools, whether citation mapping platforms or broad literature indices, reveal which papers cite one another but not which research concepts have never been studied together, nor which of these missing connections are becoming urgent. This paper presents a temporal pipeline that constructs evolving knowledge graphs from scientific literature and ranks candidate research gaps. A SciBERT model, fine tuned on SciERC and selected after comparison against a spaCy baseline and two additional transformer backbones, extracts typed entities and relations from paper abstracts, which are canonicalized and assembled into one cumulative directed knowledge graph per year. Two embedding channels are computed for each yearly graph, a structural channel based on Node2Vec with Procrustes alignment across years and a semantic channel based on SPECTER, and they are fused at the vector level with a single weight. Concept pairs with no direct edge are ranked by fused cosine similarity through a FAISS search, and a velocity re-ranker based on the yearly change in entity mentions then reorders them. The ranking is validated through a retrospective protocol in which gaps ranked from data up to a cutoff year are checked against papers published in the years that follow, in natural language processing and in a computer science adjacent subset of COVID-19 research. A sweep of the fusion weight shows that the semantic channel carries the signal. Semantic only ranking reaches hit rates above 82 percent in natural language processing and above 89 percent in COVID-19, while structural only ranking stays below 30 percent and at most 12 percent in the two domains, and an equal weight fusion falls between them. Mention velocity re-ranking helps at two of three cutoffs in natural language processing and hurts at every cutoff in COVID-19. We report these results together with the limits of the lexical hit check used to obtain them.
+\end{abstract}
+
+\begin{keywords}
+Citation analysis, cross-domain generalization, knowledge graphs, natural language processing, scientific literature mining, semantic embedding
+\end{keywords}
+
+\titlepgskip=-15pt
+
+\maketitle
+
+\section{Introduction}
+\label{sec:introduction}
+%not applying any subsections yet
+
+
+The volume of published scientific research has outpaced any individual's capacity to read it. Over four million papers were indexed on Semantic Scholar in 2023 alone~\cite{kinney2023semantic}, and the rate of publication continues to accelerate across nearly every field. For a researcher, this creates a specific and increasingly acute problem. It is no longer enough to ask what exists in a field. The more pressing and harder question is what is missing, and among everything that is missing, what matters most right now.
+
+A substantial ecosystem of tools has emerged to help researchers navigate this volume. These tools are effective at what they are designed to do, surfacing related work, visualizing citation networks, and ranking papers by relevance or influence. However, they share a structural limitation. They operate on the paper as the unit of analysis, showing which papers cite, resemble, or relate to which other papers, and none of them operate on the concept as the unit of analysis. Two research concepts can each appear in thousands of papers individually and never once be studied together, and none of these citation centric tools can detect that absence, since the absence of a connection produces no signal in a citation graph.
+
+Three specific failures motivate this work. First, current tools offer a citation only view. They do not model concept to concept relationships that exist within papers, so the fundamental question of which ideas have never been formally connected remains invisible to them by design. Second, current tools operate on a static snapshot. Every existing discovery approach analyzes the literature as it exists at a single point in time, and none model how the space of gaps itself evolves year over year, so a gap that emerged eighteen months ago and one that has sat dormant for five years look identical in a single snapshot view, even though they represent very different research opportunities. Third, current tools have no impact awareness. When a discovery tool does surface multiple candidate directions, there is no principled basis for ranking them, so a gap between two stagnant, rarely cited concepts is treated identically to a gap between two concepts experiencing explosive growth in citation activity, even though the latter represents a substantially more urgent opportunity.
+
+It is worth noting that the tools described above are commercial, consumer facing discovery platforms. A smaller and more directly related body of academic research has explored temporal and structural approaches to gap detection~\cite{choudhury2019miningtemporalevolutionknowledge, jung2022generalizability, sybrandt2020agatha, dachepally2026, ghosh2026researchrag}, and this work is discussed in detail in the related work section. That research establishes that automated, structurally grounded gap detection is an active and viable area of study, and the present work is positioned relative to it rather than against an absence of prior work.
+% TODO dachepally2026 has no entry in references.bib and no stable source was found. Add the entry or remove the citation and the matching paragraph in Section II before submission.
+
+In this paper, we propose a temporal pipeline that builds yearly knowledge graphs from scientific papers, ranks candidate research gaps between concepts that have no direct link, and reorders them by research momentum. Papers are collected year by year from ACL Anthology~\cite{radev-etal-2009-acl}, the Semantic Scholar API~\cite{kinney2023semantic}, and arXiv for the NLP domain, and from CORD-19~\cite{wang2020cord}, PubMed, Europe PMC, OpenAlex, and the Semantic Scholar API~\cite{kinney2023semantic}, for a CS adjacent subset of COVID-19 research. A SciBERT~\cite{beltagy2019scibert} model fine tuned on SciERC~\cite{luan2018multi}, chosen after comparison against a spaCy baseline and two additional transformer backbones, RoBERTa~\cite{liu2019roberta} and PubMedBERT~\cite{gu2021domain}, extracts research concepts and relationships from each paper abstract. Extracted mentions are canonicalized within each domain using fuzzy string matching constrained so that entities of different types are never merged into one another. The resulting canonical entities are assembled into a directed knowledge graph per year using NetworkX~\cite{hagberg2008exploring}, and each yearly graph is cumulative, so it holds every edge seen up to that year. Two embedding channels are then trained on each yearly graph. Node2Vec~\cite{grover2016node2vec} places concepts by their position in the graph and is kept comparable across consecutive years through Procrustes alignment. SPECTER~\cite{cohan2020specter} places concepts by the meaning of their names. The two channels are fused at the vector level with one weight, candidate pairs with no direct edge are ranked through a FAISS~\cite{johnson2019billion, douze2024faiss} similarity search, and a velocity re-ranker then reorders the resulting gaps by the yearly change in how often their entities are mentioned.
+
+The contributions of this work are as follows. First, an end to end pipeline that turns paper abstracts into yearly cumulative knowledge graphs in two domains, with a backbone comparison for typed entity and relation extraction. Second, a dual channel gap ranking that fuses Node2Vec structural embeddings with SPECTER semantic embeddings at the vector level, together with a sweep of the fusion weight. Third, a velocity re-ranking stage that reorders gaps by the yearly change in entity mentions and that is written so that citation counts can replace mention counts when they are available. Fourth, a retrospective validation protocol, in which gaps ranked from data up to a cutoff year are checked against papers published afterwards, applied to two non biomedical domains and compared against a random baseline and a co occurrence baseline. We do not claim to be first in attempting temporal, graph based gap detection, since related systems already exist in biomedical literature based discovery~\cite{sybrandt2020agatha}. We also do not claim that fusion improves on a single channel. The sweep in Section~\ref{sec:ablation} shows that it does not under our evaluation. Our contribution is the pipeline, the comparison of the two channels, and a clear account of which channel carries the signal.
+
+Three scoping decisions are made explicit here. Data collection is capped at 2024, since the corpus was frozen in 2025 and papers from that year would cover only part of the year, with extension of the corpus left as future work. The COVID-19 domain is also deliberately restricted to a CS adjacent subset, covering misinformation detection, contact tracing, symptom checker chatbots, epidemiological modeling, health informatics, NLP for COVID, and social media analysis, rather than the full virology and clinical literature, in order to remain compatible with the CS oriented entity schema used throughout the extraction pipeline. Finally, the velocity signal is computed from yearly mention counts and not from citation counts. The citation lookup through the Semantic Scholar API is implemented, but it returned no matches in the run reported here, so the pipeline used its mention count fallback.
+
+The remainder of this paper is organized as follows. Section~\ref{sec:relatedwork} discusses related work. Section~\ref{sec:methodology} describes the datasets and presents the system methodology, covering entity and relation extraction, canonicalization, temporal knowledge graph construction, dual channel embedding, gap scoring and ranking, and velocity re-ranking, together with the retrospective validation protocol used to evaluate the pipeline. Section~\ref{sec:setup} gives the experimental setup. Section~\ref{sec:results} presents results and discussion, including extraction quality, graph statistics, retrospective hit rates, the velocity re-ranker, and limitations. Section~\ref{sec:ablation} reports the ablation study on the fusion weight, and Section~\ref{sec:conclusion} concludes.
+
+\section{Related Work}
+\label{sec:relatedwork}
+
+Table~\ref{tab:relatedwork} summarizes the approaches discussed in this section alongside the present work. Prior efforts to automate research gap or research connection discovery fall broadly into two groups, consumer facing citation and recommendation platforms, already discussed in Section~\ref{sec:introduction} as sharing a paper level rather than a concept level unit of analysis, and a smaller body of academic systems that build explicit graph structures over extracted concepts and reason about their evolution or absence over time. This section focuses on the second group, since it is the group most directly comparable to the present work.
+
+\begin{table}[t]
+\caption{Academic systems for research gap and connection discovery compared with the present work.}
+\label{tab:relatedwork}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{p{0.19\columnwidth}p{0.22\columnwidth}p{0.27\columnwidth}p{0.22\columnwidth}}
+\toprule
+System & Domain & Main signal & Time handling \\
+\midrule
+AGATHA~\cite{sybrandt2020agatha} & Biomedical & Joint graph and text embedding & Temporal holdout \\
+Choudhury and Faisal~\cite{choudhury2019miningtemporalevolutionknowledge} & Obesity and sleep apnea & Handcrafted features with an LSTM & Dynamic link prediction \\
+Jung and Segev~\cite{jung2022generalizability} & Twenty topic networks & Structural network features & Topic emergence over time \\
+Dachepally and Kandasamy~\cite{dachepally2026} & Medical image segmentation & Louvain communities and TransE & Temporal decay \\
+Ghosh~\cite{ghosh2026researchrag} & TREC-COVID and SCIDOCS & Retrieval and graph attention & None reported \\
+This work & NLP and COVID CS adjacent & Fused Node2Vec and SPECTER & Yearly cumulative slices with holdout \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+AGATHA~\cite{sybrandt2020agatha} is the closest prior system to this one in spirit. It mines a large scale biomedical literature graph built from MEDLINE and combines semantic graph embedding with a transformer based ranking stage to predict plausible future research connections, validated with a temporal holdout protocol conceptually similar to the one used here. It differs from the present work in three respects. It is confined to biomedical literature, it produces a single joint embedding space rather than separately trained structural and semantic channels that are fused afterward, and it does not incorporate a velocity signal into its ranking stage.
+
+Choudhury and Faisal~\cite{choudhury2019miningtemporalevolutionknowledge} predict future keyword associations in the obesity and sleep apnea literature using hand crafted temporal and network features, genealogical community structure, and citation features fed into an LSTM classifier for dynamic supervised link prediction. Their reliance on hand engineered temporal features rather than learned embeddings is the main point of departure from the embedding space formulation adopted in the present pipeline.
+
+Jung and Segev~\cite{jung2022generalizability} take a different framing, classifying topic emergence directly from structural network features across twenty topic networks drawn from Microsoft Academic Graph, and report accuracy and F1 above 0.91 across the networks evaluated. Their system predicts which already connected topics are emerging rather than surfacing disconnected concept pairs as candidate gaps, which places it closer to a topic trend classifier than to a gap discovery system, and it does not use an embedding fusion based gap score of the kind proposed here.
+
+Dachepally and Kandasamy~\cite{dachepally2026} apply a temporal knowledge graph with Louvain community detection over orphan clusters, temporal decay, and TransE embeddings to an eight paper pilot corpus in medical image segmentation, reporting thirty gaps with an emphasis on deterministic, traceable graph evidence. Structural anomaly detection and decay are central to their formulation, and their reported TransE component did not contribute gaps in the sparse pilot experiment, with no dual channel structural and semantic similarity signal of the kind used in this work.
+
+Ghosh~\cite{ghosh2026researchrag} proposes ResearchRAG, which combines an academic knowledge graph with BM25 and dense retrieval, a graph attention network based gap scoring stage, and citation aware self correction, evaluated on TREC-COVID and SCIDOCS with 2,500 custom gap queries, reporting Precision@10 of 0.831, MRR of 0.774, and BERTScore F1 of 0.871. This system is retrieval augmented generation oriented and produces an adaptive gap synthesis rather than a ranked list of concept pairs, and it does not report a retrospective future publication test in the configuration described.
+
+A broader and largely separate line of work studies temporal knowledge graph embedding as a representation learning problem in its own right. Multi-aspect temporal knowledge graph embedding models that incorporate temporal, entity, and predicate information~\cite{xie2023temporal} improve temporal link prediction on benchmark datasets such as ICEWS14, ICEWS18, GDELT, WIKI, and YAGO, and the surveys by Zhang et al.~\cite{zhang2024survey} and Wang et al.~\cite{wang2023survey} organize the resulting model families and their applications to temporal representation and completion tasks. These works target temporal knowledge graph completion on generic benchmark graphs rather than scientific research gap detection or emerging concept pair discovery, and their evaluation protocols are not built around retrospective validation against future scientific publication. They are included here because the present pipeline also embeds a knowledge graph at successive points in time, although it uses Node2Vec on cumulative yearly graphs and not a dedicated temporal knowledge graph embedding model.
+
+Positioned against this body of work, the present pipeline differs in three ways. It fuses a structural embedding and a semantic embedding after training each one separately, rather than learning a single joint space. It adds a separate velocity re-ranking stage after gap scoring. It validates the ranking retrospectively in two non biomedical domains rather than one. We do not claim that the fused ranking beats either channel alone, and the results in Section~\ref{sec:ablation} show that it does not.
+
+
+\section{Methodology}
+\label{sec:methodology}
+
+
+This section describes the datasets used in this work and the full processing pipeline built on top of them, from raw paper collection through entity extraction, temporal knowledge graph construction, dual-channel embedding, gap scoring and ranking, velocity re-ranking, and the retrospective validation protocol used to measure predictive validity. The pipeline is implemented as a sequence of independently runnable stages, and each subsection below corresponds to one stage of that pipeline.
+
+The overall architecture of the proposed pipeline is shown in Fig.~\ref{fig:architecture}. Scientific literature is transformed into yearly cumulative knowledge graphs and subsequently processed through dual-channel representation learning, candidate gap ranking, velocity-based re-ranking, and retrospective validation.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.55\textwidth,height=0.45\textheight,keepaspectratio]{architecture.png}
+\caption{Architecture of the proposed temporal research-gap detection pipeline.}
+\label{fig:architecture}
+\end{figure*}
+
+\subsection{Datasets and Corpus Construction}
+\label{sec:datasets}
+
+Two domains are used to evaluate cross domain generalizability, natural language processing and a CS adjacent subset of COVID-19 research, chosen because they differ structurally in publication volume, citation density, and terminological maturity while both remaining compatible with a CS oriented entity schema.
+
+The NLP corpus spans 2018 through 2024 and is built from ACL Anthology~\cite{radev-etal-2009-acl}, arXiv CS.CL preprints, and Semantic Scholar enrichment~\cite{kinney2023semantic, ammar2018construction}. It is sampled down to a balanced 1,400 paper corpus, 200 papers per year, to keep year over year comparisons fair and to bound downstream extraction cost.
+
+The COVID-19 corpus spans 2019 through 2024 and is built from CORD-19~\cite{wang2020cord}, PubMed, Europe PMC, OpenAlex, and the Semantic Scholar API, since CORD-19 itself was frozen in mid 2022 and cannot supply later years on its own. It is sampled to 840 papers, 140 per year, balanced across seven CS adjacent subtopics, misinformation detection, contact tracing, symptom checker chatbots, epidemiological modeling, health informatics, NLP for COVID, and social media analysis, so that no single subtopic dominates the extracted concept vocabulary.
+
+Both corpora are built with the same quality scoring and deduplication procedure. Each candidate paper receives a composite quality score in the range zero to sixty, combining venue tier, author count, title quality, and abstract richness, and candidates are deduplicated by fuzzy title matching with a RapidFuzz similarity threshold of 0.85. A fixed random seed of 42 is used throughout sampling so that the corpus is reproducible. Both corpora are small. Every statistic reported later comes from 1,400 and 840 papers.
+
+Each candidate paper $p$ receives a composite quality score
+\begin{equation}
+Q(p) = q_{\text{venue}}(p) + q_{\text{authors}}(p) + q_{\text{title}}(p) + q_{\text{venue\_exp}}(p) + q_{\text{abstract}}(p) + q_{\text{id}}(p),
+\label{eq:quality}
+\end{equation}
+where each term is a non negative integer. For the NLP domain the venue tier term $q_{\text{venue}}(p)$ is 35 for main conferences (ACL, EMNLP, NAACL, TACL), 20 for the Findings track, 15 for other refereed venues (COLING, CoNLL, EACL), and 10 for workshops, arXiv, and other sources. The authors term $q_{\text{authors}}(p)$ is 5 when the author list is populated, the title term $q_{\text{title}}(p)$ is 5 when the title has more than five characters, the venue explicit term $q_{\text{venue\_exp}}(p)$ is 5 when the venue is present and not unknown, the abstract term $q_{\text{abstract}}(p)$ is 5 when the abstract has at least 80 words, 3 when it has at least 40, and 0 otherwise, and the identifier term $q_{\text{id}}(p)$ is 5 when a DOI, URL, anthology ID, or arXiv ID is present. The maximum NLP score is 60. The COVID-19 variant substitutes a source tier term for the venue tier term, with values of 30 for PubMed, Europe PMC, and CORD-19 verified sources, 20 for OpenAlex and Semantic Scholar indexed sources, and 10 for arXiv, bioRxiv, and medRxiv preprints, and replaces the venue explicit term with a journal explicit term; its maximum is 55. Candidate papers are deduplicated by normalized title similarity with a RapidFuzz threshold of 0.85, and a fixed random seed of 42 is used throughout sampling.
+
+\subsection{Entity and Relation Extraction}
+\label{sec:extraction}
+
+Typed entities and relations are extracted from each paper's title and abstract, since full text parsing is not used anywhere in this pipeline. Three transformer backbones are fine tuned and compared under the same protocol, SciBERT~\cite{beltagy2019scibert}, RoBERTa~\cite{liu2019roberta}, and PubMedBERT~\cite{gu2021domain}, all on SciERC~\cite{luan2018multi} using a 500 abstract split of 350 training, 50 development, and 100 test examples. A rule based spaCy pipeline is run alongside them as a baseline and is not fine tuned. Named entity recognition follows a five class schema, Task, Method, Metric, Material, and Other, obtained by mapping SciERC's OtherScientificTerm and Generic categories into the Other class.
+
+The cosine similarity between two vectors $\mathbf{a}$ and $\mathbf{b}$ is defined as
+\begin{equation}
+\cos(\mathbf{a}, \mathbf{b}) = \frac{\mathbf{a}^{\top}\mathbf{b}}{\|\mathbf{a}\|\,\|\mathbf{b}\|},
+\label{eq:cosine}
+\end{equation}
+with $\cos(\mathbf{a}, \mathbf{b}) = 0$ when either vector has zero norm. This quantity is the building block for the fused similarity in Eq.~\eqref{eq:fusedsim}, the individual channel scores reported in the ablation study, and the FAISS inner product index described in Eq.~\eqref{eq:faiss}.
+
+Relation extraction is treated as a span pair classification problem over a feature vector built by concatenating the sentence representation with the two candidate entity representations and their elementwise product. The classifier predicts SciERC's seven relation types and a no\_relation class. The seven types are mapped down to four project level relation classes, USED\_FOR, METHOD\_APPLIED\_TO, METHOD\_EVALUATED\_BY, and ENTITY\_ASSOCIATED\_WITH\_ENTITY. Sentences are capped at twelve entities to bound the quadratic growth of candidate entity pairs. During training, negative pairs are sampled at twice the number of positive pairs in a sentence, with a minimum of six.
+
+All backbones use the same settings, so the comparison is fair. Training runs for eight epochs with a learning rate of $3\times10^{-5}$ for entity recognition and $2\times10^{-5}$ for relation classification, an effective batch size of 16, and a maximum length of 256 tokens. The relation classifier uses AdamW with linear decay and a warmup of ten percent of the steps. The checkpoint with the best development score is kept. No hyperparameter search was run.
+
+Since the downstream knowledge graph depends on typed relations rather than on named entity recognition alone, the backbone is selected by its share of typed, non generic relations on the two corpora. SciBERT is selected as the extraction backbone used for the temporal knowledge graph built in the remainder of the pipeline. The multi backbone comparison is retained as a validation of that choice rather than as the production extractor, and its numbers are reported in Section~\ref{sec:results}.
+
+\subsection{Entity Canonicalization}
+\label{sec:canon}
+
+Raw extracted mentions of the same underlying concept can appear under different surface forms across papers and years, so a canonicalization step merges mentions into canonical entity nodes before graph construction. A canonical entity $c$ in domain $D$ is the set of all extracted mentions that are judged to refer to the same underlying concept,
+\begin{equation}
+c = \{\, m_i \in D \mid \text{can}(m_i) = c \,\},
+\label{eq:canonical}
+\end{equation}
+where $\text{can}(m_i)$ is the canonical identifier assigned to mention $m_i$. Canonicalization uses RapidFuzz token sort ratio with a similarity threshold of 0.85,
+\begin{equation}
+\text{sim}_{\text{TS}}(s_1, s_2) \geq \tau, \quad \tau = 0.85,
+\label{eq:canon_threshold}
+\end{equation}
+where $\text{sim}_{\text{TS}}$ is the token sort ratio between two surface forms $s_1$ and $s_2$, is constrained so that entities are never merged across different entity types, is kept isolated between the NLP and COVID-19 domains so that no cross domain merging can occur, and additionally matches acronyms against their expanded forms. This step reduces 15,084 distinct surface forms to 12,867 canonical NLP nodes and 6,117 distinct surface forms to 5,500 canonical COVID-19 nodes. The canonical nodes stand behind 28,463 entity mentions in NLP and 11,918 in COVID-19.
+
+\subsection{Temporal Knowledge Graph Construction}
+\label{sec:kg}
+
+Canonicalized entities and their typed relations are assembled into a directed knowledge graph for each year using NetworkX~\cite{hagberg2008exploring}. The graph for year $t$ is cumulative, so it contains every edge observed in any year up to and including $t$. A meaningful comparison across years requires each snapshot to build on the structure already established in prior years rather than treating each year in isolation, and the cumulative graphs are what both embedding channels described in the next subsection are trained on. The number of new nodes and edges added in a year is the difference between two consecutive slices. Only canonical entities that take part in at least one relation enter a slice.
+
+Formally, the cumulative directed knowledge graph for domain $D$ at year $t$ is
+\begin{equation}
+G_D(t) = \big(V_D(t),\, E_D(t)\big), \quad
+E_D(t) = \bigcup_{y=1}^{t} E_D(y),
+\label{eq:cumulative_graph}
+\end{equation}
+where $V_D(t)$ is the set of canonical entities that participate in at least one relation with year $\leq t$, and $E_D(t)$ is the cumulative set of typed relation edges observed up to year $t$. The yearly increment in structural content is
+\begin{equation}
+\Delta V_D(t) = |V_D(t)| - |V_D(t-1)|, \quad
+\Delta E_D(t) = |E_D(t)| - |E_D(t-1)|.
+\label{eq:graph_delta}
+\end{equation}
+
+\subsection{Dual-Channel Embedding}
+\label{sec:embedding}
+
+Two independent embedding channels are computed over the cumulative yearly graphs.
+
+The structural channel uses Node2Vec~\cite{grover2016node2vec} to embed each canonical entity based on its position in the graph at year $t$. The Node2Vec hyperparameters are fixed across all runs:
+\begin{equation}
+d = 128,\;\ell = 80,\;r = 10,\;p = q = 1,\;w = 10,\;\text{epochs} = 10,\;\text{seed} = 42,
+\label{eq:node2vec_params}
+\end{equation}
+where $d$ is the embedding dimension, $\ell$ is the walk length, $r$ is the number of walks per node, $p$ and $q$ are the return and inout parameters, $w$ is the context window, and the seed is fixed for reproducibility. Embeddings have 128 dimensions. Because Node2Vec embeddings are learned independently for each year, the resulting vector spaces are not directly comparable across years on their own. An orthogonal Procrustes alignment is therefore applied from the second year of each domain onward, registering each year's embedding space against the previous year's on the nodes the two years share, so that movement in structural embedding space stays meaningful over time. For consecutive years $t-1$ and $t$, let $\mathbf{A}_t \in \mathbb{R}^{n_t \times 128}$ and $\mathbf{B}_t \in \mathbb{R}^{n_t \times 128}$ be the matrices of aligned embeddings for the $n_t$ canonical entities shared by both years, with rows of $\mathbf{A}_t$ from year $t-1$ and rows of $\mathbf{B}_t$ from year $t$. The orthogonal Procrustes rotation matrix is
+\begin{equation}
+\mathbf{R}_t = \arg\min_{\mathbf{R}^{\top}\mathbf{R} = \mathbf{I}} \|\mathbf{A}_t - \mathbf{B}_t\mathbf{R}\|_F,
+\label{eq:procrustes}
+\end{equation}
+and each embedding vector $\mathbf{x}$ from year $t$ is rotated to $\mathbf{R}_t\mathbf{x}$ to bring it into the coordinate frame of year $t-1$.
+
+The semantic channel uses SPECTER~\cite{cohan2020specter}, a document encoder trained with a citation based objective, to embed each canonical entity. The input text is the most frequent surface form of the entity followed by its type in brackets, and the output has 768 dimensions. No paper text and no citation context enter the entity vector. The semantic vectors are also the same in every year. This channel is therefore citation informed only through the pretraining of the encoder, and it does not need the cross year alignment step. The code includes a lighter MiniLM sentence encoder as a fallback, which was not used in the reported runs. A newer SPECTER2 encoder~\cite{singh2023scirepeval} is left for future work. The SPECTER embedding of a canonical entity $u$ is
+\begin{equation}
+\mathbf{e}_u = \text{SPECTER}(\text{surf}(u) + \text{``~[}'' + \text{type}(u) + \text{``]}''), \quad \|\mathbf{e}_u\| = 768,
+\label{eq:specter}
+\end{equation}
+where $\text{surf}(u)$ is the most frequent surface form of entity $u$ and $\text{type}(u)$ is its entity type label.
+
+Fusion happens at the vector level. For an entity $u$ in the slice for year $t$, let $\hat{\mathbf{s}}_u(t)$ be its unit length Node2Vec vector padded with zeros to 768 dimensions and let $\hat{\mathbf{e}}_u$ be its unit length SPECTER vector. The fused vector is
+\begin{equation}
+\mathbf{z}_u(t) = \frac{\alpha\,\hat{\mathbf{s}}_u(t) + (1 - \alpha)\,\hat{\mathbf{e}}_u}{\left\lVert \alpha\,\hat{\mathbf{s}}_u(t) + (1 - \alpha)\,\hat{\mathbf{e}}_u \right\rVert},
+\label{eq:fusedvec}
+\end{equation}
+and the fused similarity of a candidate pair $(u, v)$ at year $t$ is
+\begin{equation}
+\text{sim}(u, v, t) = \mathbf{z}_u(t)^{\top}\mathbf{z}_v(t),
+\label{eq:fusedsim}
+\end{equation}
+where $\alpha \in [0, 1]$ is the weight on the structural channel. The weight is swept over 0, 0.25, 0.5, 0.75, and 1 in the ablation study. At $\alpha = 0$ the fused similarity equals the SPECTER cosine, and at $\alpha = 1$ it equals the Node2Vec cosine. At values in between, the padded structural vector shares its first 128 coordinates with the semantic vector, so the fused cosine is not exactly a weighted average of the two channel cosines.
+
+\subsection{Gap Scoring and Ranking}
+\label{sec:gapscoring}
+
+A candidate gap is an entity pair that is not connected by a direct relation of any type in the cumulative graph for the current year. The gap score of a candidate pair is its fused similarity multiplied by the positive part of its year over year change in fused similarity,
+\begin{equation}
+\text{gap\_score}(u, v, t) = \text{sim}(u, v, t) \cdot \max\!\big(0,\; \text{sim}(u, v, t) - \text{sim}(u, v, t-1)\big).
+\label{eq:gapscore}
+\end{equation}
+This score measures how close two concepts are at year $t$ and whether that closeness is increasing. Pairs whose fused similarity is stable or declining receive a score of zero and are dropped before ranking. An earlier design used $\text{gap\_score}(u, v, t) = \text{sim}(u, v, t)$ without the trajectory term, and the sweep in Section~\ref{sec:ablation} reports results for that simpler score as the $\alpha$-sweep entries. Scoring the trajectory directly is what the gap list produced by the dashboard's gap engine uses; the ablation study uses the simpler similarity-only score to keep the $\alpha$ sweep comparable to a single-channel baseline.
+
+Candidates are retrieved with an exact FAISS~\cite{johnson2019billion, douze2024faiss} inner product index over the fused vectors, which equals cosine similarity because the vectors have unit length,
+\begin{equation}
+\text{FAISS\_IP}(\mathbf{z}_u, \mathbf{z}_v) = \mathbf{z}_u^{\top}\mathbf{z}_v = \cos(\mathbf{z}_u, \mathbf{z}_v), \quad \|\mathbf{z}_u\| = \|\mathbf{z}_v\| = 1.
+\label{eq:faiss}
+\end{equation}
+The 20 nearest neighbors of every entity are collected and pairs with a direct edge are dropped. Near duplicate pairs are then removed, meaning pairs whose most frequent surface forms have a normalized Levenshtein ratio of at least 0.75 after lowercasing and stripping non alphanumeric characters, or a token set ratio of at least 0.90 after lowercasing,
+\begin{equation}
+\text{filter}(u, v) = \big(\text{lev}(\text{surf}(u), \text{surf}(v)) \geq 0.75\big) \;\lor\; \big(\text{tsr}(\text{surf}(u), \text{surf}(v)) \geq 0.90\big),
+\label{eq:neardup}
+\end{equation}
+where $\text{lev}$ is the normalized Levenshtein ratio on lowercased, non-alphanumeric-stripped strings and $\text{tsr}$ is the token set ratio on lowercased strings. The remaining pairs are ranked by $\text{gap\_score}(u, v, t)$, the top 500 are kept, and the top 75 are evaluated.
+
+The procedure below summarizes the fusion and ranking stage.
+
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} cumulative graph slices for years $1, \dots, T$, fusion weight $\alpha$
+\FOR{each year $t$ from $1$ to $T$}
+    \STATE compute Node2Vec embeddings on the cumulative slice for year $t$
+    \STATE Procrustes align embeddings for year $t$ against year $t-1$
+\ENDFOR
+\STATE compute SPECTER embeddings for all canonical entities once
+\STATE fuse the vectors for year $T$ via Eq.~\eqref{eq:fusedvec}
+\STATE build a FAISS inner product index over the fused vectors
+\STATE retrieve the 20 nearest neighbors of every entity
+\STATE drop pairs with a direct edge in the slice for year $T$ and near duplicate pairs
+\STATE rank the remaining pairs by $\text{gap\_score}(u, v, T)$ via Eq.~\eqref{eq:gapscore} and keep the top 500
+\STATE \textbf{Output:} ranked list of candidate research gaps
+\end{algorithmic}
+
+\subsection{Velocity Re-Ranking}
+\label{sec:velocity}
+
+Gap scoring alone does not distinguish a pair of stagnant, rarely mentioned concepts from a pair surrounded by fast growing research activity, so a velocity signal is computed and used to re-rank the gap list. The entity level velocity is defined as
+\begin{equation}
+\text{vel}(u) = \frac{n_{2024}(u) - n_{2022}(u)}{2},
+\label{eq:velocity}
+\end{equation}
+the average yearly change between 2022 and 2024 in the number $n_y(u)$ of papers from year $y$ that mention entity $u$. This is a mention velocity. The intended signal is a citation velocity, in which $n_y(u)$ is replaced by the summed citation count of those papers, fetched from the Semantic Scholar API by title match. That lookup returned no matches in the run reported here, and the citation cache stayed empty, so the pipeline fell back to mention counts by design. Mention velocity measures publication volume and not impact. It is a weaker signal, and it should not be read as a citation result. The velocity window used throughout this work is fixed at
+\begin{equation}
+\text{VEL\_WINDOW} = (2022,\, 2024),
+\label{eq:vel_window}
+\end{equation}
+for every cutoff year, meaning the numerator of Eq.~\eqref{eq:velocity} always covers the years 2022 through 2024 regardless of the cutoff.
+
+Entities that do not appear in the window years get a velocity of zero. Pair level priority combines the gap score with the mean velocity of the two entities involved,
+\begin{equation}
+\text{priority}(u, v) = \text{gap\_score}(u, v, t) \cdot \text{mean}\big(\text{vel}(u), \text{vel}(v)\big).
+\label{eq:priority}
+\end{equation}
+A negative mean velocity gives a negative priority and pushes the pair to the bottom of the list. Re-ranking by priority is meant to move gaps surrounded by rising activity toward the top of the candidate list, consistent with the impact awareness motivation described in Section~\ref{sec:introduction}. Section~\ref{sec:results} reports whether it does.
+
+\subsection{Retrospective Validation Protocol}
+\label{sec:validation}
+
+Predictive validity is measured with a retrospective protocol applied independently in each domain. A cutoff year $t_{\text{cutoff}}$ splits each domain's history into a pre-cutoff period, used to generate candidate gaps, and a post-cutoff period, used only to check whether those candidates went on to be studied together. The gap list is produced from the cumulative graph for the cutoff year, so the graph and the structural embedding use no paper published after the cutoff. The top 75 pairs of the list are checked.
+
+Formally, the cutoff year splits the data as
+\begin{equation}
+\text{pre-cutoff: } y \leq t_{\text{cutoff}}, \quad \text{post-cutoff: } y > t_{\text{cutoff}}.
+\label{eq:cutoff_split}
+\end{equation}
+The gap list is produced from the pre-cutoff cumulative graph
+\begin{equation}
+G_D^{\text{pre}}(t_{\text{cutoff}}) = G_D(t_{\text{cutoff}}),
+\label{eq:pre_graph}
+\end{equation}
+and from structural embeddings aligned through year $t_{\text{cutoff}}$ only,
+\begin{equation}
+\mathbf{s}_u^{\text{pre}}(t_{\text{cutoff}}) = \mathbf{s}_u(t_{\text{cutoff}}), \quad u \in V_D(t_{\text{cutoff}}).
+\label{eq:pre_embs}
+\end{equation}
+The semantic embeddings are time-independent and are used in full for all cutoff years.
+
+A pair $(u, v)$ is counted as a validated hit if a lexical materialization proxy is met. Let $T(u)$ be the set of lowercase alphabetic tokens of at least four characters taken from all surface forms of entity $u$, and let $P_p$ be the set of such tokens in the title and abstract of a paper $p$ published after the cutoff year. The pair is a hit if
+\begin{equation}
+\exists\, p \;:\; T(u) \cap P_p \neq \emptyset \;\text{ and }\; T(v) \cap P_p \neq \emptyset.
+\label{eq:hit}
+\end{equation}
+This check is lenient, since one shared word for each entity is enough. It is applied in the same way to every setting, and it runs over the sampled papers only.
+
+Two reference rankings are used. The random baseline draws 75 pairs at random from the 500 pairs ranked highest at $\alpha = 0.5$ and averages the hit rate over three seeds. The co occurrence baseline uses no embeddings. Its candidates are entity pairs that appear together in at least one paper before the cutoff and are not connected in the cutoff year graph, after entities with fewer than three associated papers are pruned, since very low frequency entities produce unstable co occurrence signal. The top pairs by pre cutoff co occurrence frequency are carried forward for checking. The same protocol is applied at three cutoff years in each domain to check that predictive validity is not an artifact of any single split.
+
+\section{Experimental Setup}
+\label{sec:setup}
+
+The pipeline is written in Python. Node2Vec runs on CPU with a fixed seed of 42, and FAISS runs on CPU with an exact index. SPECTER embeddings for both domains were computed on a CUDA device in 277.84 seconds. Node2Vec fit time grows with the size of the cumulative graph, from 4.6 seconds for the 2018 NLP slice to 61.7 seconds for the 2024 slice, and from 4.0 to 20.3 seconds across the COVID-19 slices.
+% TODO add the GPU model, CPU model, RAM, and fine tuning time. None of these are recorded in the run logs.
+
+Cutoff years are 2021, 2022, and 2023 for NLP, and 2020, 2021, and 2022 for COVID-19. At each cutoff the top 75 pairs are checked against every sampled paper published after the cutoff, which gives 600 papers for the 2021 NLP cutoff and 420 papers for the 2021 COVID-19 cutoff. The fusion weight is swept over five values. All hit rates are out of 75 pairs, so one hit equals 1.3 points.
+
+\section{Results and Discussion}
+\label{sec:results}
+
+\subsection{Extraction Quality}
+
+Table~\ref{tab:extraction} compares the backbones. PubMedBERT reaches the highest entity F1 on the SciERC test set at 0.608, SciBERT follows at 0.597, and RoBERTa reaches 0.564. The gap between PubMedBERT and SciBERT is 0.011. SciBERT gives the highest share of typed relations in both domains, 65.9 percent in NLP and 45.6 percent in COVID-19, against 61.6 and 34.6 percent for PubMedBERT. The relation classifier was evaluated for SciBERT only, with an F1 of 0.689 on 3,248 test pairs. The spaCy baseline was not scored against SciERC. Its typed relation share is 4.3 percent in NLP and 2.6 percent in COVID-19, since nearly all of its relations fall in the generic class.
+
+\begin{table}[t]
+\caption{Extraction backbones. Entity scores are on the SciERC test set. Typed share is the share of non generic relations extracted from each corpus.}
+\label{tab:extraction}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lccccc}
+\toprule
+Model & P & R & F1 & Typed NLP & Typed COVID \\
+\midrule
+SciBERT & 0.611 & 0.585 & 0.597 & 65.9 & 45.6 \\
+RoBERTa & 0.549 & 0.580 & 0.564 & 61.1 & 39.7 \\
+PubMedBERT & 0.591 & 0.626 & 0.608 & 61.6 & 34.6 \\
+spaCy baseline & none & none & none & 4.3 & 2.6 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Entity quality is modest for all three backbones. The Other class holds 31.6 percent of NLP entities and 35.9 percent of COVID-19 entities extracted by SciBERT. This matters later, because noisy entities reach the gap list.
+
+\subsection{Graph Statistics}
+
+Table~\ref{tab:graph} gives the size of the cumulative graph for each year. Both graphs grow steadily. After 2018 the NLP graph adds between 1,354 and 1,521 nodes and between 2,825 and 3,471 edges per year. After 2019 the COVID-19 graph adds between 535 and 733 nodes and between 910 and 1,554 edges per year. The 2024 slice holds 10,611 of the 12,867 canonical NLP entities and 3,968 of the 5,500 canonical COVID-19 entities. Both graphs are sparse, with an average total degree of about 4.0 in NLP and 3.8 in COVID-19 in 2024.
+
+\begin{table}[t]
+\caption{Nodes and edges of the cumulative yearly graphs.}
+\label{tab:graph}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabular}{lrrrr}
+\toprule
+Year & NLP nodes & NLP edges & COVID nodes & COVID edges \\
+\midrule
+2018 & 1,815 & 2,823 & none & none \\
+2019 & 3,336 & 5,648 & 783 & 1,016 \\
+2020 & 4,840 & 8,660 & 1,346 & 1,926 \\
+2021 & 6,299 & 11,572 & 1,881 & 2,950 \\
+2022 & 7,810 & 14,670 & 2,614 & 4,504 \\
+2023 & 9,257 & 17,942 & 3,285 & 6,040 \\
+2024 & 10,611 & 21,413 & 3,968 & 7,509 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Retrospective Validation}
+
+Table~\ref{tab:hitrate} reports the hit rate of the ranking at the default weight $\alpha = 0.5$ against the two references. In NLP the ranking reaches 64.0, 68.0, and 54.7 percent at cutoffs 2021, 2022, and 2023, against 48.0, 58.7, and 50.2 percent for the random baseline. In COVID-19 it reaches 36.0, 42.7, and 49.3 percent at cutoffs 2020, 2021, and 2022, against 17.3, 22.7, and 24.9 percent. The margin over random is between 4.5 and 16.0 points in NLP and between 18.7 and 24.4 points in COVID-19. The co occurrence baseline reaches 57.3 percent in NLP at cutoff 2021, below the 64.0 of the fused ranking. In COVID-19 it reaches 18.7 and 17.3 percent at cutoffs 2020 and 2021, below 36.0 and 42.7. The co occurrence baseline was not run at the other cutoffs. It varied by about two hits across repeated runs.
+
+\begin{table}[t]
+\caption{Hit rate in percent of the ranking at $\alpha = 0.5$ against the two references. Each value is out of 75 pairs.}
+\label{tab:hitrate}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{3}{c}{NLP} & \multicolumn{3}{c}{COVID-19} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+Setting & 2021 & 2022 & 2023 & 2020 & 2021 & 2022 \\
+\midrule
+Fused ranking, $\alpha = 0.5$ & 64.0 & 68.0 & 54.7 & 36.0 & 42.7 & 49.3 \\
+Random baseline & 48.0 & 58.7 & 50.2 & 17.3 & 22.7 & 24.9 \\
+Co occurrence baseline & 57.3 & none & none & 18.7 & 17.3 & none \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+The random baseline is high in NLP. Random pairs from the top 500 already reach about half of the hits, which shows how lenient the check in Eq.~\eqref{eq:hit} is. Any single four letter word shared with a later abstract counts for each entity. The check is much less lenient in COVID-19, where the random baseline stays between 17.3 and 24.9 percent. This difference in the baseline is the reason the COVID-19 margins look larger than the NLP margins, and the two domains should not be compared through raw hit rates alone.
+
+Some top pairs are not research gaps in the sense that motivates this work. In the 2024 NLP list at $\alpha = 0.5$, the pair of \textit{contrastive learning framework} and \textit{exemplar-wise contrastive learning} describes one idea under two names. The pair of \textit{pla} and \textit{other} and the pair of \textit{ER)} and \textit{LCG)} are extraction noise. The near duplicate filter removes many variants of this kind but not all of them.
+
+\subsection{Velocity Re-Ranking}
+
+Table~\ref{tab:velocity} compares the fused ranking with the velocity re-ranked list. In this run 4,601 of the 12,867 NLP entities and 2,319 of the 5,500 COVID-19 entities receive a velocity value, and the rest get zero. In NLP, 2,193 of these velocities are positive and 2,258 are negative. In COVID-19, 1,154 are positive and 1,097 are negative.
+
+\begin{table}[t]
+\caption{Hit rate in percent of the fused ranking at $\alpha = 0.5$, the mention velocity re-ranked list, and a random draw from the re-ranked pool. Each value is out of 75 pairs.}
+\label{tab:velocity}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{3}{c}{NLP} & \multicolumn{3}{c}{COVID-19} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+Setting & 2021 & 2022 & 2023 & 2020 & 2021 & 2022 \\
+\midrule
+Fused only & 64.0 & 68.0 & 54.7 & 36.0 & 42.7 & 49.3 \\
+Velocity re-ranked & 48.0 & 72.0 & 61.3 & 28.0 & 22.7 & 37.3 \\
+Random from pool & 54.7 & 58.2 & 54.2 & 20.4 & 24.4 & 26.2 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+The result is mixed. In NLP the re-ranker improves the hit rate by 4.0 points at cutoff 2022 and by 6.6 points at cutoff 2023, and it loses 16.0 points at cutoff 2021. In COVID-19 it loses 8.0, 20.0, and 12.0 points at the three cutoffs. On this evidence the re-ranker as implemented is not shown to help.
+
+Three things explain part of this. First, the signal is a mention count and not a citation count, so it measures how often a concept appears in a small sampled corpus and not how much attention it receives. With 200 or 140 papers per year, most velocities are small multiples of 0.5. Second, the list becomes narrow. Nine of the top ten re-ranked NLP pairs contain the same entity, \textit{XLT}. Third, the velocity window of 2022 to 2024 overlaps the holdout period at every cutoff tested, so the velocity uses information from the period the ranking is later checked against. This last point can only make the re-ranker look better than it should, and it still does not help in COVID-19.
+
+\subsection{Limitations}
+
+The results have limits that a reader should weigh. The corpora are small and sampled, so the holdout check runs over 420 to 600 papers and not over the literature. The hit check in Eq.~\eqref{eq:hit} is lexical and lenient, and it favors pairs whose names share words. Entity names and surface forms are taken from the whole corpus, so a small amount of post cutoff information reaches the semantic vectors and the hit check. The semantic channel embeds names only, and it does not use paper text or citation context. The gap score has no trajectory term in the $\alpha$-sweep runs. The velocity signal is a mention count, and its window overlaps the holdout. The best entity F1 is about 0.6, so noisy entities reach the gap list. All numbers come from one run with fixed seeds and have no confidence intervals. No human review of gap quality was carried out. The sweep cutoffs differ between the two domains, and the co occurrence baseline was run at different cutoffs than the sweep, so comparisons across them cover only the cutoffs they share.
+
+\section{Ablation Study on the Fusion Weight}
+\label{sec:ablation}
+
+Table~\ref{tab:sweep} reports the hit rate for each value of $\alpha$. The weight on the structural channel is the only setting that changes between rows. Structural only ranking is the row with $\alpha = 1$ and semantic only ranking is the row with $\alpha = 0$.
+
+\begin{table}[t]
+\caption{Hit rate in percent for each fusion weight $\alpha$, the weight on the structural channel. Each value is out of 75 pairs. The random baseline is drawn from the top 500 pairs at $\alpha = 0.5$.}
+\label{tab:sweep}
+\footnotesize
+\setlength{\tabcolsep}{3pt}
+\resizebox{\columnwidth}{!}{%
+\begin{tabular}{lcccccc}
+\toprule
+& \multicolumn{3}{c}{NLP} & \multicolumn{3}{c}{COVID-19} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}
+Setting & 2021 & 2022 & 2023 & 2020 & 2021 & 2022 \\
+\midrule
+$\alpha = 0$, semantic only & 92.0 & 85.3 & 82.7 & 94.7 & 92.0 & 89.3 \\
+$\alpha = 0.25$ & 76.0 & 78.7 & 73.3 & 69.3 & 80.0 & 76.0 \\
+$\alpha = 0.5$ & 64.0 & 68.0 & 54.7 & 36.0 & 42.7 & 49.3 \\
+$\alpha = 0.75$ & 25.3 & 36.0 & 20.0 & 22.7 & 13.3 & 5.3 \\
+$\alpha = 1$, structural only & 20.0 & 29.3 & 16.0 & 12.0 & 2.7 & 5.3 \\
+Random baseline & 48.0 & 58.7 & 50.2 & 17.3 & 22.7 & 24.9 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+The hit rate does not rise as the structural weight rises, in either domain or at any cutoff. Semantic only ranking is the best setting everywhere. It reaches 92.0, 85.3, and 82.7 percent in NLP and 94.7, 92.0, and 89.3 percent in COVID-19. Structural only ranking is the worst setting, at 20.0, 29.3, and 16.0 percent in NLP and 12.0, 2.7, and 5.3 percent in COVID-19. It falls below the random baseline in all six cases. The setting at $\alpha = 0.75$ falls below the random baseline in five of six cases. The default weight of 0.5 is not the best setting. It sits between the two channels in every case.
+
+Two facts should be kept in mind when reading these numbers. The first is that the semantic vectors are built from entity names, so the nearest neighbors of an entity in the semantic channel tend to be entities with similar names. Such pairs share words, and sharing words is exactly what the check in Eq.~\eqref{eq:hit} looks for. Part of the semantic advantage is therefore a property of the check and not proof that the ranking finds research that later happens. The near duplicate filter reduces this effect but does not remove it. The second fact is that the structural channel is trained on a sparse graph with an average total degree near 4. Its neighbors are entities that occupy similar positions in the graph and need not share any words. That helps to explain why it scores below random under a lexical check. It does not show that structural position carries no information about future research.
+
+The ordering of the five settings is the same in both domains. That is the one result that holds up across domains, and it agrees in direction with the claim that the two domains behave alike. It disagrees with the expectation that fusing the two channels helps. Under the present evaluation, the structural channel adds nothing to the semantic channel, and the fused ranking is worse than the semantic channel alone.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+This paper presented a temporal pipeline that builds yearly knowledge graphs from scientific abstracts in two domains, ranks concept pairs that have no direct link, and checks the ranking against papers published after a cutoff year. SciBERT was chosen as the extraction backbone because it gives the highest share of typed relations, even though PubMedBERT reaches a slightly higher entity F1. Node2Vec and SPECTER embeddings were fused at the vector level and swept over five weights.
+
+The main finding is about the channels. Semantic only ranking gives the highest hit rate in every domain and at every cutoff, and structural only ranking gives the lowest. Fusion at equal weight lands between them. The velocity re-ranker, built on mention counts because the citation lookup returned no matches, helped at two of three cutoffs in NLP and hurt at all three in COVID-19. These results are bounded by a lenient lexical hit check, small sampled corpora, and a velocity window that overlaps the holdout.
+
+Future work has five parts. The first is to add the trajectory term to the gap score, so that pairs which are converging are ranked above pairs which are only close. The second is to compute real citation velocity, with a window that ends before the cutoff year. The third is to build entity vectors from paper text with SPECTER2~\cite{singh2023scirepeval}, so that the semantic channel uses context and not only names. The fourth is a stricter materialization check, for example one that requires both entities to be extracted from the same paper. The fifth is expert review of the top gaps and a larger corpus. The corpus can be extended past 2024 once those years have accumulated enough papers.
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

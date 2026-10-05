@@ -62,8 +62,8 @@ def _load_component2(domain_key: str):
     ent_path = COMP2_OUT / f"{short}_entities.json"
     rel_path = COMP2_OUT / f"{short}_relations.json"
     ext_path = COMP2_OUT / f"{short}_extracted.json"
-    if not ent_path.exists() or not rel_path.exists():
-        return None, None, None
+    if not ent_path.exists() or not rel_path.exists() or not ext_path.exists():
+        return None, None, None, None
 
     entities = json.loads(ent_path.read_text())
     relations = json.loads(rel_path.read_text())
