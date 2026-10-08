@@ -240,7 +240,6 @@ streamlit run app.py
 
 | File | Description |
 |------|-------------|
-| `paper_with_equations.tex` | Full journal paper in LaTeX (IEEE Access format) with numbered equations |
 | `equations_mapping.md` | Maps every equation in the paper to its source code location |
 | `DATASET_SOURCES_AND_LINKS.md` | Centralized catalog of all dataset sources, portals, and download links |
 | `dashboard/BUILD.md` | Documents the real-data export bridge (Component 7) |
