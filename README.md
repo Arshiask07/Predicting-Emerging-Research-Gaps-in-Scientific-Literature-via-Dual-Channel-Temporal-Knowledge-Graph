@@ -1,8 +1,10 @@
 # Temporal Knowledge Graph Embedding for Emerging Research Gap Detection
 
-A 6-component ML/NLP pipeline that discovers emerging research gaps in scientific literature by building temporal knowledge graphs from paper corpora, extracting entities and relations with SciBERT, computing structural + semantic embeddings, and ranking candidate gaps by fused similarity.
+A 7-component ML/NLP pipeline that discovers emerging research gaps in scientific literature by building temporal knowledge graphs from paper corpora, extracting entities and relations with SciBERT, computing structural + semantic embeddings, and ranking candidate gaps by fused similarity.
 
 **Domains:** NLP (ACL Anthology + arXiv, 2018–2024, 1400 papers) · COVID-19 (multi-source, 2019–2024, 840 papers)
+
+**Paper:** `paper_with_equations.tex` (IEEE Access format) · [DOCX version](Temporal%20Knowledge%20Graph%20Embedding%20for%20Emerging%20Research%20Gap%20Detection%20in%20Scientific%20Literature%20(1).docx)
 
 ---
 
@@ -33,17 +35,21 @@ capstone_sep_15/
 ├── component5/             # Component 5 — structural + semantic embeddings, gap ranking, evaluation
 ├── component6/             # Component 6 — citation velocity + reranking
 │
-├── dashboard/              # Streamlit interactive explorer
+├── dashboard/              # Component 7 — Streamlit interactive explorer
 │   ├── app.py              # Main Streamlit app
 │   ├── config.py           # Shared paths & constants
 │   ├── data_loader.py      # Data loading utilities
 │   ├── gap_engine.py       # Gap ranking logic
 │   ├── make_demo_embeddings.py
-│   └── exports/            # Generated CSV exports (gitignored)
+│   ├── export_real_entities_edges.py   # C2 JSON → dashboard CSV (entities + edges)
+│   ├── export_real_embeddings.py       # C5 .npy → dashboard CSV (node2vec + specter2)
+│   ├── export_real_citations.py        # C6 velocity JSON → dashboard CSV (citations)
+│   ├── exports/            # Generated CSV exports (gitignored)
+│   └── BUILD.md            # Real-data bridge documentation
 │
-├── archive/                # Archived earlier outputs
-├── emergent_landing.html   # Single-file Japandi landing page
-├── timeline.html           # Timeline visualization
+├── paper_with_equations.tex              # Journal paper (LaTeX, IEEE Access format)
+├── equations_mapping.md                  # Equation-to-code line mapping for the paper
+├── DATASET_SOURCES_AND_LINKS.md          # Centralized catalog of all dataset sources & download links
 └── docs/                   # (future — currently top-level .md files serve this role)
 ```
 
@@ -52,13 +58,13 @@ capstone_sep_15/
 | # | Directory | Purpose | Key outputs |
 |---|-----------|---------|-------------|
 | 1 | `data_collection/` | Collect papers from ACL Anthology, Semantic Scholar, arXiv, CORD-19, PubMed, Europe PMC, OpenAlex | `data/nlp/*.json`, `data/covid/*.json` (1400 NLP + 840 COVID) |
-| 2 | `component2_entity_relation_extraction/` | SciBERT NER + relation extraction over sampled corpus | `{domain}_entities.json` (28k NLP / 12k COVID), `{domain}_relations.json` (23k NLP / 8k COVID) |
+| 2 | `component2_entity_relation_extraction/` | SciBERT NER + relation extraction over sampled corpus | `{domain}_entities.json` (30,248 NLP / 29,814 COVID), `{domain}_relations.json` (13,122 NLP / 12,162 COVID) |
 | 2b | `com2_using_3models/` | Same task with 3 transformer backbones for comparison | Per-model outputs + comparison report |
 | 3 | `component3/` | Retrospective validation: predict gaps pre-cutoff, check post-cutoff co-occurrence | `output/validation_*.json/.md` |
 | 4 | `component4/` | Build directed NetworkX KG per year + interactive HTML viewer | `graph_viewer.html`, `graph_summary.json` |
-| 5 | `component5/` | Node2Vec structural embeddings + SPECTER2 semantic embeddings → fuse (alpha) → rank gaps via FAISS → evaluate | `output/gaps/`, `output/embeddings/`, ablation reports, `top_gaps_*_latest.json` |
+| 5 | `component5/` | Node2Vec structural embeddings + SPECTER semantic embeddings → fuse (alpha) → rank gaps via FAISS → evaluate | `output/gaps/`, `output/embeddings/`, ablation reports, `top_gaps_*_latest.json` |
 | 6 | `component6/` | Entity velocity (mention counts) → re-rank Component 5 gaps by priority | `output/reranked/` (65 gap files), `output/ablation_velocity_*`, `top_velocity_gaps_*_latest.json` |
-| D | `dashboard/` | Streamlit app to explore gaps, graph timeline, validation results | `app.py` + supporting modules. Tab 2 reads the **real** Component 5/6 gap files, not the demo embeddings |
+| 7 | `dashboard/` | Streamlit app to explore gaps, graph timeline, validation results. Reads **real** Component 2/5/6 data via export scripts | `app.py` + supporting modules + `exports/` CSVs |
 
 ## Technologies
 
@@ -66,9 +72,9 @@ capstone_sep_15/
 - **PyTorch + Transformers** (SciBERT, RoBERTa, PubMedBERT for NER/relation extraction)
 - **NetworkX** (temporal graph slicing)
 - **Node2Vec** (structural embeddings)
-- **Sentence Transformers / SPECTER2** (semantic embeddings)
+- **Sentence Transformers / SPECTER** (semantic embeddings)
 - **FAISS** (gap ranking via cosine similarity)
-- **spaCy + rapidfuzz** (baseline extraction, entity normalization)
+- **rapidfuzz** (entity normalization, near-duplicate filtering)
 - **Streamlit + Pyvis + Plotly** (interactive dashboard)
 - **Pandas + NumPy + SciPy** (data processing)
 
@@ -87,7 +93,6 @@ capstone_sep_15/
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python3 -m spacy download en_core_web_sm
 ```
 
 ### Dependencies
@@ -139,8 +144,10 @@ cd component2_entity_relation_extraction/scripts
 python extract_entities_relations_baseline.py
 
 # Tier 2 SciBERT NER + relation extraction (requires internet for SciERC + model download)
-python extract_entities_relations_scibert.py --step full
-python extract_relations_scibert.py --step full
+python extract_entities_relations_scibert.py --train   # one-time: fine-tune the NER head on SciERC
+python extract_entities_relations_scibert.py --run     # inference over the sampled corpora
+python extract_relations_scibert.py --train            # one-time: fine-tune the relation classifier
+python extract_relations_scibert.py --run              # classify relations over the extracted entity spans
 
 # Multi-model comparison (SciBERT + RoBERTa + PubMedBERT)
 cd ../../com2_using_3models/scripts
@@ -174,7 +181,7 @@ python 01_build_slices.py
 # Step 2: Structural embeddings (Node2Vec + Procrustes alignment)
 python 02_structural_embeddings.py
 
-# Step 3: Semantic embeddings (SPECTER2 / MiniLM fallback)
+# Step 3: Semantic embeddings (SPECTER / MiniLM fallback)
 python 03_semantic_embeddings.py
 
 # Step 4: Fuse + rank gaps via FAISS
@@ -203,10 +210,17 @@ python 03_rerank.py
 python 04_evaluate.py
 ```
 
-### Dashboard
+### Component 7 — Dashboard
 
 ```bash
 cd dashboard
+
+# Export real pipeline data to dashboard CSV format (run after Components 2, 5, 6)
+python export_real_entities_edges.py   # C2 JSON → entities + edges CSVs
+python export_real_embeddings.py        # C5 .npy → node2vec + specter2 CSVs
+python export_real_citations.py         # C6 velocity JSON → citations CSVs
+
+# Launch the dashboard
 streamlit run app.py
 ```
 
@@ -214,13 +228,26 @@ streamlit run app.py
 
 | File | Description | Size |
 |------|-------------|------|
-| `data_collection/data/nlp/acl_anthology_{year}.json` | ACL Anthology papers per year (raw) | ~5–9 MB/year |
+| `data_collection/data/nlp/acl_anthology_{year}.json` | ACL Anthology papers per year (raw) | ~2.3–9 MB/year |
 | `data_collection/data/nlp/arxiv_cscl_{year}.json` | arXiv CS-CL preprints per year | varies |
-| `data_collection/data/nlp/nlp_corpus_sampled.json` | Consolidated 1400-paper NLP corpus | ~11 MB |
+| `data_collection/data/nlp/nlp_corpus_sampled.json` | Consolidated 1400-paper NLP corpus | ~2 MB |
 | `data_collection/data/nlp.zip` | Bundled NLP data archive | 11 MB |
 | `data_collection/data/covid/covid_harvested_{year}.json` | COVID papers per year (raw) | ~1–2 MB/year |
 | `data_collection/data/covid/covid_corpus_sampled.json` | Consolidated 840-paper COVID corpus | ~2 MB |
 | `data_collection/data/covid/cord19_filtered_{year}.json` | CORD-19 filtered subset | varies |
+
+## Documentation
+
+| File | Description |
+|------|-------------|
+| `paper_with_equations.tex` | Full journal paper in LaTeX (IEEE Access format) with numbered equations |
+| `equations_mapping.md` | Maps every equation in the paper to its source code location |
+| `DATASET_SOURCES_AND_LINKS.md` | Centralized catalog of all dataset sources, portals, and download links |
+| `dashboard/BUILD.md` | Documents the real-data export bridge (Component 7) |
+| `component5/working_log.md` | Component 5 development log |
+| `component6/working_log.md` | Component 6 development log |
+| `component3/COMPONENT3_REPORT.md` | Component 3 detailed report |
+| `data_collection/SAMPLING_REPORT.md` | Data collection and sampling report |
 
 ## Important Notes
 
@@ -228,29 +255,17 @@ streamlit run app.py
 
 2. **Absolute paths were fixed:** Scripts in `component5/` and `com2_using_3models/scripts/eval_scierc_relation_f1.py` originally contained hard-coded `/Users/anjan/Desktop/capstone_sep_15` paths. These have been converted to relative paths derived from `__file__`. If you add new scripts, use the `Path(__file__).resolve().parents[N]` pattern.
 
-3. **Large model checkpoints are NOT in this repo:** The fine-tuned NER/relation model weights (~2.5 GB total across both Component 2 trees) are `gitignore`d. They must be re-downloaded/fine-tuned on clone. See `component2_entity_relation_extraction/scripts/checkpoints/README*` or the Component 2 report for download instructions.
+3. **Large model checkpoints are NOT in this repo:** The fine-tuned NER/relation model weights (~2.5 GB total across both Component 2 trees) are `gitignore`d. They must be re-downloaded/fine-tuned on clone — run the `--train` steps under Component 2 above, or see the Component 2 report for details.
 
 4. **Regenerable outputs are NOT in this repo:** Embeddings (.npy), graph slices (.gpickle), and the full sweep of intermediate gap/rerank files are `gitignore`d. Only the final research-result artifacts (ablation reports, top-gap summaries, validation results) are tracked.
 
-5. **Dashboard exports are NOT in this repo:** The 32 CSV files in `dashboard/exports/` are generated by `make_demo_embeddings.py` and are `gitignore`d. They contain synthetic embeddings — see note 7.
+5. **Dashboard exports are NOT in this repo:** The CSV files in `dashboard/exports/` are generated by the export scripts and are `gitignore`d. Two types of data coexist:
+   - **Real data** (via `export_real_*.py`): Actual Component 2/5/6 outputs converted to CSV. Used by the Top Gaps tab and gap analysis.
+   - **Synthetic data** (via `make_demo_embeddings.py`): Random `np.random.randn` vectors for graph-exploration UI responsiveness. Used only by the Graph Timeline tab. **Not** real embeddings — do not use for reported results.
 
-6. **Semantic Scholar API:** Components 1 and 6 can call the S2 API, but it
-   requires institutional access that is not available on this machine. The
-   pipeline therefore runs on **mention velocity** (papers-per-year counts from
-   Component 2's `entities.json`), recorded by the `FALLBACK.txt` flags in
-   `component6/output/citations/`. Mention velocity measures publication
-   volume, not citation impact — do not report it as a citation result. Set
-   `S2_API_KEY` and delete the flags to switch paths.
+6. **Semantic Scholar API:** Components 1 and 6 can call the S2 API, but it requires institutional access that is not available on this machine. The pipeline therefore runs on **mention velocity** (papers-per-year counts from Component 2's `entities.json`), recorded by the `FALLBACK.txt` flags in `component6/output/citations/`. Mention velocity measures publication volume, not citation impact — do not report it as a citation result. Set `S2_API_KEY` and delete the flags to switch paths.
 
-7. **Dashboard `exports/` embeddings are synthetic:** The CSVs in
-   `dashboard/exports/` (`node2vec_*`, `specter2_*`) are random
-   `np.random.randn` vectors generated by `make_demo_embeddings.py` for
-   graph-exploration UI only. They are **not** real Node2Vec or SPECTER
-   embeddings and must not be used for reported results. The real embeddings
-   are in `component5/output/embeddings/`, and the dashboard's Top Gaps tab
-   reads the real ranked gap files from `component5/output/gaps/` and
-   `component6/output/reranked/` instead. The Graph Timeline tab still
-   renders from the synthetic CSVs for responsiveness.
+7. **Dashboard data flow:** The dashboard reads real pipeline data through three export scripts (`export_real_entities_edges.py`, `export_real_embeddings.py`, `export_real_citations.py`). These convert C2 JSON, C5 .npy, and C6 velocity JSON into the CSV format `data_loader.py` expects. Run them after re-running any pipeline component to refresh the dashboard.
 
 ## Future Improvements
 
@@ -259,6 +274,11 @@ streamlit run app.py
 - Add unit tests for core data-loading and validation functions
 - Add a `pyproject.toml` with proper package structure
 - Containerize the pipeline (Docker) for reproducible runs
+- Extend the corpus past 2024 once those years have accumulated enough papers
+- Add the trajectory term to the gap score for the main ranking path
+- Compute real citation velocity with a window ending before the cutoff year
+- Build entity vectors from paper text with SPECTER2 for richer semantic signals
+- Conduct expert review of top-ranked gaps
 
 ## License
 
